@@ -12,6 +12,7 @@ import { useChatStore } from '@/stores/chat';
 import { useIFormStore } from '@/stores/iform';
 import { useUtilsStore } from '@/stores/utils';
 import { generateIFormEmbedLink } from '@/utils/iformEmbedLink';
+import { readHtmlFile } from '@/utils/htmlFile';
 import { matchText } from '@/utils/pinyinMatch';
 import { contentUnescape } from '@/utils/tools';
 import { plainTextToTiptapJson } from '@/utils/tiptap-render';
@@ -816,6 +817,7 @@ const requestSmartLinkImageUpload = (source: SmartLinkUploadSource) => {
 
 const quickIFormModalShow = ref(false);
 const creatingIForm = ref(false);
+const quickIFormHtmlFileInput = ref<HTMLInputElement | null>(null);
 const overlayInteractionAt = ref(0);
 const quickIFormForm = reactive({
   name: '',
@@ -872,6 +874,25 @@ const openQuickIFormCreateModal = () => {
   }
   resetQuickIFormForm();
   quickIFormModalShow.value = true;
+};
+
+const triggerQuickIFormHtmlUpload = () => {
+  if (!quickIFormHtmlFileInput.value) return;
+  quickIFormHtmlFileInput.value.value = '';
+  quickIFormHtmlFileInput.value.click();
+};
+
+const handleQuickIFormHtmlUpload = async (event: Event) => {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  try {
+    quickIFormForm.embedCode = await readHtmlFile(file);
+    message.success('HTML 文件已读取');
+  } catch (error: any) {
+    message.error(error?.message || '读取 HTML 文件失败');
+  }
 };
 
 const confirmQuickIFormCreate = async () => {
@@ -4276,12 +4297,22 @@ defineExpose({
           />
         </n-form-item>
         <n-form-item label="嵌入代码">
-          <n-input
-            type="textarea"
-            v-model:value="quickIFormForm.embedCode"
-            placeholder="可选：粘贴 HTML / iframe 代码（可含 script）"
-            :rows="3"
-          />
+          <n-space vertical size="small" style="width: 100%;">
+            <input
+              ref="quickIFormHtmlFileInput"
+              type="file"
+              accept=".html,.htm,text/html"
+              hidden
+              @change="handleQuickIFormHtmlUpload"
+            />
+            <n-button size="small" secondary @click="triggerQuickIFormHtmlUpload">上传HTML文件</n-button>
+            <n-input
+              type="textarea"
+              v-model:value="quickIFormForm.embedCode"
+              placeholder="可选：粘贴 HTML / iframe 代码（可含 script）"
+              :rows="3"
+            />
+          </n-space>
         </n-form-item>
         <n-form-item label="默认尺寸">
           <div style="display: flex; gap: 0.5rem; width: 100%;">

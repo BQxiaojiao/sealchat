@@ -167,7 +167,17 @@
             <n-input v-model:value="formModel.url" placeholder="https://example.com" :disabled="!!editingForm?.templateRef" />
           </n-form-item>
           <n-form-item label="嵌入代码">
-            <n-input type="textarea" v-model:value="formModel.embedCode" placeholder="支持粘贴 HTML / iframe 代码（可含 script）" :rows="3" :disabled="!!editingForm?.templateRef" />
+            <n-space vertical size="small" style="width: 100%;">
+              <input
+                ref="htmlFileInput"
+                type="file"
+                accept=".html,.htm,text/html"
+                hidden
+                @change="handleHtmlUpload"
+              />
+              <n-button size="small" secondary :disabled="!!editingForm?.templateRef" @click="triggerHtmlUpload">上传HTML文件</n-button>
+              <n-input type="textarea" v-model:value="formModel.embedCode" placeholder="支持粘贴 HTML / iframe 代码（可含 script）" :rows="3" :disabled="!!editingForm?.templateRef" />
+            </n-space>
           </n-form-item>
           <n-form-item label="默认尺寸">
             <div class="iform-form__size">
@@ -288,6 +298,7 @@ import {
 } from '@/utils/internalSurfaceLink';
 import { api } from '@/stores/_config';
 import type { ChannelIFormTemplateCatalogItem } from '@/types/iform';
+import { readHtmlFile } from '@/utils/htmlFile';
 
 const iform = useIFormStore();
 const chat = useChatStore();
@@ -343,6 +354,7 @@ const templatePage = ref(1);
 const templatePageSize = 30;
 const templateTotal = ref(0);
 const importInput = ref<HTMLInputElement | null>(null);
+const htmlFileInput = ref<HTMLInputElement | null>(null);
 
 const channelOptions = computed(() => flattenChannels(chat.channelTree || [], chat.curChannel?.id));
 
@@ -422,6 +434,25 @@ const openFormModal = (form?: ChannelIForm) => {
     resetFormModel();
   }
   formModalVisible.value = true;
+};
+
+const triggerHtmlUpload = () => {
+  if (!htmlFileInput.value) return;
+  htmlFileInput.value.value = '';
+  htmlFileInput.value.click();
+};
+
+const handleHtmlUpload = async (event: Event) => {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  try {
+    formModel.embedCode = await readHtmlFile(file);
+    message.success('HTML 文件已读取');
+  } catch (error: any) {
+    message.error(error?.message || '读取 HTML 文件失败');
+  }
 };
 
 const handleSubmit = async () => {

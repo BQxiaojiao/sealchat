@@ -25,6 +25,7 @@ import {
   resolveCharacterCardNarratorCountBadge,
 } from '@/utils/characterCardNarratorSettings';
 import { DEFAULT_CARD_TEMPLATE, getWorldCardTemplate, resolveTemplateValue, setWorldCardTemplate } from '@/utils/characterCardTemplate';
+import { readHtmlFile } from '@/utils/htmlFile';
 import { uploadImageAttachment } from '@/views/chat/composables/useAttachmentUploader';
 import AvatarVue from '@/components/avatar.vue';
 import AvatarEditor from '@/components/AvatarEditor.vue';
@@ -334,6 +335,7 @@ const overlayTemplateEditorVisible = ref(false);
 const overlayTemplateEditorTarget = ref<'channel' | 'personal'>('channel');
 const draggingOverlayItemId = ref('');
 const overlayTemplateImportInput = ref<HTMLInputElement | null>(null);
+const templateHtmlFileInput = ref<HTMLInputElement | null>(null);
 const overlayTemplateEditorPreferredColumns = ref(2);
 let nextOverlayItemSerial = 1;
 
@@ -1112,6 +1114,25 @@ const openTemplateCreateModal = () => {
   templateGlobalDefault.value = false;
   templateSheetDefault.value = false;
   templateModalVisible.value = true;
+};
+
+const triggerTemplateHtmlUpload = () => {
+  if (!templateHtmlFileInput.value) return;
+  templateHtmlFileInput.value.value = '';
+  templateHtmlFileInput.value.click();
+};
+
+const handleTemplateHtmlUpload = async (event: Event) => {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  try {
+    templateContent.value = await readHtmlFile(file);
+    message.success('HTML 文件已读取');
+  } catch (error: any) {
+    message.error(error?.message || '读取 HTML 文件失败');
+  }
 };
 
 const openTemplateEditModal = (item: CharacterCardTemplate) => {
@@ -2613,13 +2634,30 @@ defineExpose({ openCardById });
         />
       </n-form-item>
       <n-form-item label="模板内容">
-        <n-input
-          v-model:value="templateContent"
-          type="textarea"
-          :autosize="{ minRows: 8, maxRows: 16 }"
-          placeholder="输入 HTML 模板"
-          :disabled="characterApiDisabled"
-        />
+        <n-space vertical size="small" style="width: 100%;">
+          <input
+            ref="templateHtmlFileInput"
+            type="file"
+            accept=".html,.htm,text/html"
+            hidden
+            @change="handleTemplateHtmlUpload"
+          />
+          <n-button
+            size="small"
+            secondary
+            :disabled="characterApiDisabled"
+            @click="triggerTemplateHtmlUpload"
+          >
+            上传HTML文件
+          </n-button>
+          <n-input
+            v-model:value="templateContent"
+            type="textarea"
+            :autosize="{ minRows: 8, maxRows: 16 }"
+            placeholder="输入 HTML 模板"
+            :disabled="characterApiDisabled"
+          />
+        </n-space>
       </n-form-item>
       <n-form-item label="默认角色徽章模板">
         <n-input

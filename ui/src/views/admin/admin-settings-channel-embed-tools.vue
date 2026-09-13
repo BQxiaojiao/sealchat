@@ -4,6 +4,7 @@ import { computed, h, onMounted, reactive, ref } from 'vue'
 import { NButton, NSpace, useMessage, useDialog } from 'naive-ui'
 import { api } from '@/stores/_config'
 import { triggerBlobDownload } from '@/utils/download'
+import { readHtmlFile } from '@/utils/htmlFile'
 
 interface TemplateItem {
   ref: string
@@ -27,6 +28,7 @@ const editingId = ref('')
 const items = ref<TemplateItem[]>([])
 const searchText = ref('')
 const importFileInputRef = ref<HTMLInputElement | null>(null)
+const templateHtmlFileInputRef = ref<HTMLInputElement | null>(null)
 const filteredItems = computed(() => {
   const query = searchText.value.trim().toLowerCase()
   if (!query) return items.value
@@ -107,6 +109,26 @@ const load = async () => {
 }
 
 const openCreate = () => { reset(); modalVisible.value = true }
+
+const triggerTemplateHtmlUpload = () => {
+  if (!templateHtmlFileInputRef.value) return
+  templateHtmlFileInputRef.value.value = ''
+  templateHtmlFileInputRef.value.click()
+}
+
+const handleTemplateHtmlUpload = async (event: Event) => {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  try {
+    form.embedCode = await readHtmlFile(file)
+    message.success('HTML 文件已读取')
+  } catch (error: any) {
+    message.error(error?.message || '读取 HTML 文件失败')
+  }
+}
+
 const openEdit = async (item: TemplateItem) => {
   if (item.origin !== 'platform') return
   reset()
@@ -275,7 +297,19 @@ onMounted(load)
         <n-form-item label="名称"><n-input v-model:value="form.name" /></n-form-item>
         <n-form-item label="描述"><n-input v-model:value="form.description" type="textarea" /></n-form-item>
         <n-form-item label="URL"><n-input v-model:value="form.url" /></n-form-item>
-        <n-form-item label="嵌入代码"><n-input v-model:value="form.embedCode" type="textarea" :rows="4" /></n-form-item>
+        <n-form-item label="嵌入代码">
+          <n-space vertical size="small" style="width: 100%;">
+            <input
+              ref="templateHtmlFileInputRef"
+              type="file"
+              accept=".html,.htm,text/html"
+              hidden
+              @change="handleTemplateHtmlUpload"
+            />
+            <n-button size="small" secondary @click="triggerTemplateHtmlUpload">上传HTML文件</n-button>
+            <n-input v-model:value="form.embedCode" type="textarea" :rows="4" />
+          </n-space>
+        </n-form-item>
         <n-form-item label="宽 × 高"><n-space><n-input-number v-model:value="form.defaultWidth" :min="1" /><n-input-number v-model:value="form.defaultHeight" :min="1" /></n-space></n-form-item>
         <n-form-item label="默认状态">
           <n-space size="small" :wrap="true">
