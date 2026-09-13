@@ -82,3 +82,4 @@ skills-lock.json
 # Do not apply the general ignore rules to files under bin/
 !bin/**
 /bin/cn-font-split
+ui/scripts/quickdraw-inline-style.test.mjs
