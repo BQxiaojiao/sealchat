@@ -76,7 +76,7 @@ func CharacterSnapshotList(channelID, actorID string) ([]*protocol.CharacterSnap
 	if err != nil {
 		return nil, err
 	}
-	platformTemplateCache, err := loadPlatformCharacterSnapshotTemplates(rows)
+	templateResolver, err := loadCharacterSnapshotTemplateResolver(rows)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +91,7 @@ func CharacterSnapshotList(channelID, actorID string) ([]*protocol.CharacterSnap
 		}
 		item, err := characterSnapshotModelToProtocol(row)
 		if err == nil && item != nil {
-			applyEffectiveCharacterSnapshotTemplates(item, settings, preferences[item.UserID], platformTemplateCache)
+			applyEffectiveCharacterSnapshotTemplatesWithResolver(item, settings, preferences[item.UserID], templateResolver)
 			items = append(items, item)
 		}
 	}
@@ -307,7 +307,10 @@ func CharacterSnapshotUpsert(channelID, identityID, actorID, sourceType, sourceC
 	}
 	settings, preferences, templateErr := loadCharacterSnapshotTemplates(channelID)
 	if templateErr == nil {
-		applyEffectiveCharacterSnapshotTemplates(item, settings, preferences[actorID])
+		resolver, resolverErr := loadCharacterSnapshotTemplateResolver([]*model.ChannelCharacterSnapshotModel{saved})
+		if resolverErr == nil {
+			applyEffectiveCharacterSnapshotTemplatesWithResolver(item, settings, preferences[actorID], resolver)
+		}
 	}
 	return &CharacterSnapshotWriteResult{Item: item, Changed: changed}, nil
 }
@@ -340,7 +343,10 @@ func CharacterSnapshotClear(channelID, identityID, actorID string) (*CharacterSn
 	item, _ := characterSnapshotModelToProtocol(&row)
 	settings, preferences, templateErr := loadCharacterSnapshotTemplates(channelID)
 	if templateErr == nil {
-		applyEffectiveCharacterSnapshotTemplates(item, settings, preferences[actorID])
+		resolver, resolverErr := loadCharacterSnapshotTemplateResolver([]*model.ChannelCharacterSnapshotModel{&row})
+		if resolverErr == nil {
+			applyEffectiveCharacterSnapshotTemplatesWithResolver(item, settings, preferences[actorID], resolver)
+		}
 	}
 	return &CharacterSnapshotWriteResult{Item: item, Changed: true}, nil
 }
@@ -499,7 +505,7 @@ func loadCharacterSnapshotTemplates(channelID string) (*model.ChannelCharacterSn
 	return settings, preferences, nil
 }
 
-func loadPlatformCharacterSnapshotTemplates(rows []*model.ChannelCharacterSnapshotModel) (map[string]*model.PlatformCharacterCardTemplateModel, error) {
+func loadPlatformCharacterSnapshotTemplates(rows []*model.ChannelCharacterSnapshotModel, managedRefs ...string) (map[string]*model.PlatformCharacterCardTemplateModel, error) {
 	ids := make(map[string]struct{})
 	for _, row := range rows {
 		if row == nil {
@@ -510,6 +516,12 @@ func loadPlatformCharacterSnapshotTemplates(rows []*model.ChannelCharacterSnapsh
 			continue
 		}
 		parsed, ok := ParseCharacterCardTemplateRef(data.Card.PlatformTemplateRef)
+		if ok && parsed.Source == CharacterCardTemplateRefSourcePlatform {
+			ids[parsed.ID] = struct{}{}
+		}
+	}
+	for _, ref := range managedRefs {
+		parsed, ok := ParseCharacterCardTemplateRef(ref)
 		if ok && parsed.Source == CharacterCardTemplateRefSourcePlatform {
 			ids[parsed.ID] = struct{}{}
 		}
@@ -534,74 +546,337 @@ func loadPlatformCharacterSnapshotTemplates(rows []*model.ChannelCharacterSnapsh
 	return cache, nil
 }
 
+type characterSnapshotTemplateResolver struct {
+	bindings          map[string]*model.CharacterCardTemplateBindingModel
+	bindingLookups    map[string]bool
+	userTemplates     map[string]*model.CharacterCardTemplateModel
+	resolutions       map[string]*CharacterCardTemplateResolution
+	platformTemplates map[string]*model.PlatformCharacterCardTemplateModel
+	sharedTemplateIDs map[string]struct{}
+}
+
+func newCharacterSnapshotTemplateResolver(platformTemplates map[string]*model.PlatformCharacterCardTemplateModel) *characterSnapshotTemplateResolver {
+	return &characterSnapshotTemplateResolver{
+		bindings:          make(map[string]*model.CharacterCardTemplateBindingModel),
+		bindingLookups:    make(map[string]bool),
+		userTemplates:     make(map[string]*model.CharacterCardTemplateModel),
+		resolutions:       make(map[string]*CharacterCardTemplateResolution),
+		platformTemplates: platformTemplates,
+		sharedTemplateIDs: make(map[string]struct{}),
+	}
+}
+
+func characterSnapshotTemplateBindingKey(userID, channelID, sourceCardID string) string {
+	return userID + "\x00" + channelID + "\x00" + sourceCardID
+}
+
+func loadCharacterSnapshotTemplateResolver(rows []*model.ChannelCharacterSnapshotModel) (*characterSnapshotTemplateResolver, error) {
+	resolver := newCharacterSnapshotTemplateResolver(nil)
+	if len(rows) == 0 {
+		return resolver, nil
+	}
+
+	channelID := ""
+	userIDs := make(map[string]struct{})
+	sourceCardIDs := make(map[string]struct{})
+	for _, row := range rows {
+		if row == nil {
+			continue
+		}
+		if channelID == "" {
+			channelID = row.ChannelID
+		}
+		if row.UserID != "" && row.SourceCardID != "" {
+			userIDs[row.UserID] = struct{}{}
+			sourceCardIDs[row.SourceCardID] = struct{}{}
+			resolver.bindingLookups[characterSnapshotTemplateBindingKey(row.UserID, row.ChannelID, row.SourceCardID)] = true
+		}
+	}
+	var bindings []*model.CharacterCardTemplateBindingModel
+	if channelID != "" && len(userIDs) > 0 && len(sourceCardIDs) > 0 {
+		userIDList := make([]string, 0, len(userIDs))
+		for userID := range userIDs {
+			userIDList = append(userIDList, userID)
+		}
+		sourceCardIDList := make([]string, 0, len(sourceCardIDs))
+		for sourceCardID := range sourceCardIDs {
+			sourceCardIDList = append(sourceCardIDList, sourceCardID)
+		}
+		if err := model.GetDB().Where("channel_id = ?", channelID).
+			Where("user_id IN ?", userIDList).
+			Where("external_card_id IN ?", sourceCardIDList).
+			Find(&bindings).Error; err != nil {
+			return nil, err
+		}
+	}
+	managedRefs := make([]string, 0, len(bindings))
+	userTemplateIDs := make(map[string]struct{})
+	for _, binding := range bindings {
+		if binding != nil {
+			resolver.bindings[characterSnapshotTemplateBindingKey(binding.UserID, binding.ChannelID, binding.ExternalCardID)] = binding
+			if binding.Mode != model.CharacterCardTemplateModeManaged || strings.TrimSpace(binding.TemplateID) == "" {
+				continue
+			}
+			parsed, ok := ParseCharacterCardTemplateRef(binding.TemplateID)
+			if !ok {
+				continue
+			}
+			if parsed.Source == CharacterCardTemplateRefSourcePlatform {
+				managedRefs = append(managedRefs, parsed.Ref)
+			} else {
+				userTemplateIDs[parsed.ID] = struct{}{}
+			}
+		}
+	}
+	if len(userTemplateIDs) > 0 {
+		idList := make([]string, 0, len(userTemplateIDs))
+		for id := range userTemplateIDs {
+			idList = append(idList, id)
+		}
+		var templates []*model.CharacterCardTemplateModel
+		if err := model.GetDB().Where("id IN ?", idList).Find(&templates).Error; err != nil {
+			return nil, err
+		}
+		for _, template := range templates {
+			if template != nil {
+				resolver.userTemplates[template.ID] = template
+			}
+		}
+		channel, err := model.ChannelGet(channelID)
+		if err != nil {
+			return nil, err
+		}
+		if channel != nil {
+			worldID := strings.TrimSpace(channel.WorldID)
+			if worldID != "" {
+				var sharedBindings []*model.WorldCharacterCardTemplateBindingModel
+				if err := model.GetDB().Where("world_id = ?", worldID).
+					Where("template_id IN ?", idList).
+					Find(&sharedBindings).Error; err != nil {
+					return nil, err
+				}
+				for _, binding := range sharedBindings {
+					if binding != nil {
+						if templateID := strings.TrimSpace(binding.TemplateID); templateID != "" {
+							resolver.sharedTemplateIDs[templateID] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+	}
+	platformTemplates, err := loadPlatformCharacterSnapshotTemplates(rows, managedRefs...)
+	if err != nil {
+		return nil, err
+	}
+	resolver.platformTemplates = platformTemplates
+	return resolver, nil
+}
+
+func (r *characterSnapshotTemplateResolver) resolveRef(ref string) *CharacterCardTemplateResolution {
+	if r == nil {
+		return nil
+	}
+	parsed, ok := ParseCharacterCardTemplateRef(ref)
+	if !ok {
+		return nil
+	}
+	if resolved := r.resolutions[parsed.Ref]; resolved != nil {
+		return resolved
+	}
+	if parsed.Source != CharacterCardTemplateRefSourcePlatform {
+		return nil
+	}
+	if r.platformTemplates == nil {
+		if model.GetDB() == nil {
+			return nil
+		}
+		resolved, err := ResolveCharacterCardTemplateRef(parsed.Ref)
+		if err != nil || resolved == nil || !resolved.Exists {
+			return nil
+		}
+		r.resolutions[parsed.Ref] = resolved
+		return resolved
+	}
+	platformTemplate := r.platformTemplates[parsed.ID]
+	if platformTemplate == nil {
+		return nil
+	}
+	resolved := &CharacterCardTemplateResolution{
+		Ref: parsed.Ref, Source: parsed.Source, ID: parsed.ID, Exists: true,
+		Enabled: platformTemplate.Enabled, Name: platformTemplate.Name, SheetType: platformTemplate.SheetType,
+		Content: platformTemplate.Content, BadgeTemplateOverride: platformTemplate.BadgeTemplateOverride,
+		TheaterOverlayTemplateJSON: platformTemplate.TheaterOverlayTemplateJSON, PlatformTemplate: platformTemplate,
+	}
+	r.resolutions[parsed.Ref] = resolved
+	return resolved
+}
+
+func (r *characterSnapshotTemplateResolver) resolveBindingTemplate(item *protocol.CharacterSnapshotItem, binding *model.CharacterCardTemplateBindingModel) *CharacterCardTemplateResolution {
+	if r == nil || item == nil || binding == nil {
+		return nil
+	}
+	parsed, ok := ParseCharacterCardTemplateRef(binding.TemplateID)
+	if !ok {
+		return nil
+	}
+	if parsed.Source == CharacterCardTemplateRefSourcePlatform {
+		return r.resolveRef(parsed.Ref)
+	}
+	template := r.userTemplates[parsed.ID]
+	if template == nil || (template.UserID != item.UserID && !r.templateIsShared(parsed.ID)) {
+		return nil
+	}
+	if resolved := r.resolutions[parsed.Ref]; resolved != nil {
+		return resolved
+	}
+	resolved := &CharacterCardTemplateResolution{
+		Ref: parsed.Ref, Source: parsed.Source, ID: parsed.ID, Exists: true, Enabled: true,
+		Name: template.Name, SheetType: template.SheetType, Content: template.Content,
+		BadgeTemplateOverride: template.DefaultBadgeTemplate, UserTemplate: template,
+	}
+	r.resolutions[parsed.Ref] = resolved
+	return resolved
+}
+
+func (r *characterSnapshotTemplateResolver) templateIsShared(templateID string) bool {
+	if r == nil {
+		return false
+	}
+	_, ok := r.sharedTemplateIDs[templateID]
+	return ok
+}
+
+func (r *characterSnapshotTemplateResolver) resolveBinding(item *protocol.CharacterSnapshotItem) (*CharacterCardTemplateResolution, bool) {
+	if r == nil || item == nil || item.SourceCardID == "" || item.UserID == "" || item.ChannelID == "" {
+		return nil, false
+	}
+	key := characterSnapshotTemplateBindingKey(item.UserID, item.ChannelID, item.SourceCardID)
+	binding, found := r.bindings[key]
+	if !found && !r.bindingLookups[key] && model.GetDB() != nil {
+		var err error
+		binding, err = model.CharacterCardTemplateBindingGet(item.UserID, item.ChannelID, item.SourceCardID)
+		if err == nil && binding != nil {
+			r.bindings[key] = binding
+			found = true
+		}
+		r.bindingLookups[key] = true
+	}
+	if !found || binding == nil {
+		return nil, false
+	}
+	if binding.Mode != model.CharacterCardTemplateModeManaged || strings.TrimSpace(binding.TemplateID) == "" {
+		return nil, true
+	}
+	return r.resolveBindingTemplate(item, binding), true
+}
+
+func (r *characterSnapshotTemplateResolver) resolve(item *protocol.CharacterSnapshotItem) *CharacterCardTemplateResolution {
+	if r == nil || item == nil || item.Data.Card == nil {
+		return nil
+	}
+	if resolved, bindingFound := r.resolveBinding(item); bindingFound {
+		return resolved
+	}
+	parsed, ok := ParseCharacterCardTemplateRef(item.Data.Card.PlatformTemplateRef)
+	if !ok || parsed.Source != CharacterCardTemplateRefSourcePlatform {
+		return nil
+	}
+	return r.resolveRef(parsed.Ref)
+}
+
+func (r *characterSnapshotTemplateResolver) resolvePlatformRef(item *protocol.CharacterSnapshotItem) *CharacterCardTemplateResolution {
+	if r == nil || item == nil || item.Data.Card == nil {
+		return nil
+	}
+	parsed, ok := ParseCharacterCardTemplateRef(item.Data.Card.PlatformTemplateRef)
+	if !ok || parsed.Source != CharacterCardTemplateRefSourcePlatform {
+		return nil
+	}
+	return r.resolveRef(parsed.Ref)
+}
+
 func applyEffectiveCharacterSnapshotTemplates(item *protocol.CharacterSnapshotItem, settings *model.ChannelCharacterSnapshotSettingsModel, preference *model.ChannelCharacterSnapshotPreferenceModel, platformTemplateCache ...map[string]*model.PlatformCharacterCardTemplateModel) {
+	var cache map[string]*model.PlatformCharacterCardTemplateModel
+	if len(platformTemplateCache) > 0 {
+		cache = platformTemplateCache[0]
+	}
+	resolver := newCharacterSnapshotTemplateResolver(cache)
+	if item != nil && item.ChannelID != "" && item.UserID != "" && item.SourceCardID != "" && model.GetDB() != nil {
+		payloadJSON, err := json.Marshal(item.Data)
+		if err == nil {
+			loaded, loadErr := loadCharacterSnapshotTemplateResolver([]*model.ChannelCharacterSnapshotModel{{
+				ChannelID: item.ChannelID, UserID: item.UserID, SourceCardID: item.SourceCardID, PayloadJSON: string(payloadJSON),
+			}})
+			if loadErr == nil {
+				for id, template := range cache {
+					loaded.platformTemplates[id] = template
+				}
+				resolver = loaded
+			}
+		}
+	}
+	applyEffectiveCharacterSnapshotTemplatesWithResolver(item, settings, preference, resolver)
+}
+
+func applyEffectiveCharacterSnapshotTemplatesWithResolver(item *protocol.CharacterSnapshotItem, settings *model.ChannelCharacterSnapshotSettingsModel, preference *model.ChannelCharacterSnapshotPreferenceModel, resolver *characterSnapshotTemplateResolver) {
 	if item == nil {
 		return
 	}
 	hasExplicitChannelSettings := settings != nil && strings.TrimSpace(settings.ID) != ""
-	item.BadgeTemplate = settings.BadgeTemplate
+	item.BadgeTemplate = ""
+	if settings != nil {
+		item.BadgeTemplate = settings.BadgeTemplate
+	}
 	item.BadgeTemplateDisabled = false
-	item.TheaterOverlayTemplateJSON = settings.TheaterOverlayTemplateJSON
+	item.TheaterOverlayTemplateJSON = ""
+	if settings != nil {
+		item.TheaterOverlayTemplateJSON = settings.TheaterOverlayTemplateJSON
+	}
 	if item.TheaterOverlayTemplateJSON == "" {
 		item.TheaterOverlayTemplateJSON = defaultCharacterOverlayTemplate
 	}
 	allowTheaterOverlayFallback := !hasExplicitChannelSettings
-	if preference == nil {
-		applyPlatformCharacterSnapshotTemplate(item, nil, allowTheaterOverlayFallback, platformTemplateCache...)
-		return
+	if preference != nil {
+		switch preference.BadgeTemplateMode {
+		case "off":
+			item.BadgeTemplate = ""
+			item.BadgeTemplateDisabled = true
+		case "custom":
+			item.BadgeTemplate = preference.BadgeTemplate
+		}
+		switch preference.TheaterOverlayTemplateMode {
+		case "off":
+			item.TheaterOverlayTemplateJSON = ""
+			allowTheaterOverlayFallback = false
+		case "custom":
+			item.TheaterOverlayTemplateJSON = preference.TheaterOverlayTemplateJSON
+			allowTheaterOverlayFallback = false
+		}
 	}
-	switch preference.BadgeTemplateMode {
-	case "off":
-		item.BadgeTemplate = ""
-		item.BadgeTemplateDisabled = true
-	case "custom":
-		item.BadgeTemplate = preference.BadgeTemplate
-	}
-	switch preference.TheaterOverlayTemplateMode {
-	case "off":
-		item.TheaterOverlayTemplateJSON = ""
-		allowTheaterOverlayFallback = false
-	case "custom":
-		item.TheaterOverlayTemplateJSON = preference.TheaterOverlayTemplateJSON
-		allowTheaterOverlayFallback = false
-	}
-	applyPlatformCharacterSnapshotTemplate(item, preference, allowTheaterOverlayFallback, platformTemplateCache...)
+	applyResolvedCharacterSnapshotTemplate(item, resolver.resolve(item), !item.BadgeTemplateDisabled, allowTheaterOverlayFallback)
 }
 
 func applyPlatformCharacterSnapshotTemplate(item *protocol.CharacterSnapshotItem, preference *model.ChannelCharacterSnapshotPreferenceModel, allowTheaterOverlayFallback bool, platformTemplateCache ...map[string]*model.PlatformCharacterCardTemplateModel) {
-	if item == nil || item.Data.Card == nil {
-		return
-	}
-	ref := strings.TrimSpace(item.Data.Card.PlatformTemplateRef)
-	parsed, ok := ParseCharacterCardTemplateRef(ref)
-	if !ok || parsed.Source != CharacterCardTemplateRefSourcePlatform {
-		return
-	}
-	var resolved *CharacterCardTemplateResolution
+	var cache map[string]*model.PlatformCharacterCardTemplateModel
 	if len(platformTemplateCache) > 0 {
-		platformTemplate := platformTemplateCache[0][parsed.ID]
-		if platformTemplate == nil {
-			return
-		}
-		resolved = &CharacterCardTemplateResolution{
-			Ref: ref, Source: parsed.Source, ID: parsed.ID, Exists: true,
-			Content: platformTemplate.Content, BadgeTemplateOverride: platformTemplate.BadgeTemplateOverride,
-			TheaterOverlayTemplateJSON: platformTemplate.TheaterOverlayTemplateJSON, PlatformTemplate: platformTemplate,
-		}
-	} else {
-		var err error
-		resolved, err = ResolveCharacterCardTemplateRef(ref)
-		if err != nil || resolved == nil || !resolved.Exists || resolved.PlatformTemplate == nil {
-			return
-		}
+		cache = platformTemplateCache[0]
 	}
-	if resolved.Content != "" {
+	resolver := newCharacterSnapshotTemplateResolver(cache)
+	resolved := resolver.resolvePlatformRef(item)
+	badgeEnabled := preference == nil || preference.BadgeTemplateMode != "off"
+	applyResolvedCharacterSnapshotTemplate(item, resolved, badgeEnabled, allowTheaterOverlayFallback)
+}
+
+func applyResolvedCharacterSnapshotTemplate(item *protocol.CharacterSnapshotItem, resolved *CharacterCardTemplateResolution, badgeEnabled, allowTheaterOverlayFallback bool) {
+	if item == nil || resolved == nil || !resolved.Exists {
+		return
+	}
+	if resolved.Content != "" && item.Data.Card != nil {
 		item.Data.Card.TemplateText = resolved.Content
 	}
-	if preference == nil || preference.BadgeTemplateMode != "off" {
-		if resolved.BadgeTemplateOverride != "" {
-			item.BadgeTemplate = resolved.BadgeTemplateOverride
-		}
+	if badgeEnabled && resolved.BadgeTemplateOverride != "" {
+		item.BadgeTemplate = resolved.BadgeTemplateOverride
 	}
 	if allowTheaterOverlayFallback && resolved.TheaterOverlayTemplateJSON != "" {
 		item.TheaterOverlayTemplateJSON = resolved.TheaterOverlayTemplateJSON

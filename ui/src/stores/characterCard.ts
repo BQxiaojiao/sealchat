@@ -78,6 +78,8 @@ export interface CharacterCardBadgeEntry {
   attrs: Record<string, any>;
   updatedAt: number;
   platformTemplateRef?: string;
+  disabled?: boolean;
+  effective?: boolean;
 }
 
 export interface OnlineCharacterCardItem {
@@ -1671,22 +1673,41 @@ export const useCharacterCardStore = defineStore('characterCard', () => {
     if (isNarratorIdentity(channelId, identityId)) return null;
     const snapshot = snapshotStore.getSnapshot(channelId, identityId);
     if (snapshot) {
-      if (snapshot.badgeTemplateDisabled) return null;
-      if (!snapshot.data.badgeEnabled) return null;
-      const template = String(snapshot.badgeTemplate || '').trim();
       const attrs = snapshot.data.badgeAttrs || {};
-      if (template && hasRenderableBadgeData(template, attrs)) {
+      const updatedAt = Math.floor((snapshot.sourceUpdatedAt || snapshot.lastSeenAt || Date.now()) / 1000);
+      const platformTemplateRef = snapshot.data.card?.platformTemplateRef;
+      if (snapshot.badgeTemplateDisabled) {
         return {
           identityId,
           channelId,
-          template,
+          template: '',
           attrs,
-          updatedAt: Math.floor((snapshot.sourceUpdatedAt || snapshot.lastSeenAt || Date.now()) / 1000),
-          ...(snapshot.data.card?.platformTemplateRef ? { platformTemplateRef: snapshot.data.card.platformTemplateRef } : {}),
+          updatedAt,
+          effective: true,
+          disabled: true,
+          ...(platformTemplateRef ? { platformTemplateRef } : {}),
         };
       }
+      if (snapshot.data.badgeEnabled) {
+        const template = String(snapshot.badgeTemplate || '').trim();
+        if (template && hasRenderableBadgeData(template, attrs)) {
+          return {
+            identityId,
+            channelId,
+            template,
+            attrs,
+            updatedAt,
+            effective: true,
+            disabled: false,
+            ...(platformTemplateRef ? { platformTemplateRef } : {}),
+          };
+        }
+      }
     }
-    return badgeCacheByChannel.value[channelId]?.[identityId] || null;
+    const legacyEntry = badgeCacheByChannel.value[channelId]?.[identityId];
+    return legacyEntry
+      ? { ...legacyEntry, effective: false, disabled: false }
+      : null;
   };
 
   watch(
