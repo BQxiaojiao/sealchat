@@ -123,6 +123,16 @@ const toggleBadgeSettingsExpanded = () => {
   badgeSettingsExpanded.value = !badgeSettingsExpanded.value;
 };
 
+const badgeFormatSettingsExpanded = ref(true);
+
+const badgeFormatSettingsToggleIcon = computed(() => (
+  badgeFormatSettingsExpanded.value ? ChevronDown : ChevronRight
+));
+
+const toggleBadgeFormatSettingsExpanded = () => {
+  badgeFormatSettingsExpanded.value = !badgeFormatSettingsExpanded.value;
+};
+
 const onlineCharacterCardsExpanded = ref(true);
 
 const onlineCharacterCardsToggleIcon = computed(() => (
@@ -362,6 +372,11 @@ const templateModeOptions = [
   { label: '继承频道', value: 'inherit' },
   { label: '个人模板', value: 'custom' },
   { label: '关闭', value: 'off' },
+];
+const badgeTemplateModeOptions = [
+  { label: '跟随默认', value: 'inherit' },
+  { label: '使用个人兜底', value: 'custom' },
+  { label: '关闭徽章', value: 'off' },
 ];
 const currentWorldId = computed(() => chatStore.currentWorldId || '');
 const theaterOverlaySettingsToggleIcon = computed(() => (
@@ -1043,6 +1058,62 @@ const currentActiveCardId = computed(() => {
   return cardStore.getActiveCardId(channelId);
 });
 
+const effectiveBadgeTemplateInfo = computed(() => {
+  const channelId = resolvedChannelId.value;
+  const preference = channelId
+    ? snapshotStore.preferenceByChannel[channelId]
+    : undefined;
+  const settings = channelId
+    ? snapshotStore.settingsByChannel[channelId]
+    : undefined;
+
+  if (preference?.badgeTemplateMode === 'off') {
+    return {
+      source: 'disabled' as const,
+      sourceLabel: '已关闭',
+      template: '',
+    };
+  }
+
+  const activeCardId = currentActiveCardId.value;
+  if (channelId && activeCardId) {
+    const binding = templateStore.getBinding(channelId, activeCardId);
+    const templateId = String(binding?.templateId || '').trim();
+    if (binding?.mode === 'managed' && templateId) {
+      const managedTemplate = templateStore.templates.find(tpl => tpl.ref === templateId)
+        || templateStore.templates.find(tpl => tpl.id === templateId);
+      const managedBadgeTemplate = String(
+        managedTemplate?.badgeTemplateOverride
+          || managedTemplate?.defaultBadgeTemplate
+          || '',
+      ).trim();
+      if (managedTemplate && managedBadgeTemplate) {
+        return {
+          source: 'card-template' as const,
+          sourceLabel: `人物卡 · ${managedTemplate.name}`,
+          template: managedBadgeTemplate,
+          templateName: managedTemplate.name,
+        };
+      }
+    }
+  }
+
+  const personalTemplate = String(preference?.badgeTemplate || '').trim();
+  if (preference?.badgeTemplateMode === 'custom' && personalTemplate) {
+    return {
+      source: 'personal' as const,
+      sourceLabel: '个人兜底',
+      template: personalTemplate,
+    };
+  }
+
+  return {
+    source: 'channel' as const,
+    sourceLabel: '频道模板',
+    template: String(settings?.badgeTemplate || '').trim(),
+  };
+});
+
 const sortedFilteredChannelCards = computed(() => {
   const activeCardId = currentActiveCardId.value;
   const boundCardId = currentBoundCardId.value;
@@ -1184,6 +1255,14 @@ const handleSaveTemplate = async () => {
         isSheetDefault: templateSheetDefault.value,
       });
       await syncOpenWindowsForTemplate(templateEditingId.value);
+      const channelId = resolvedChannelId.value;
+      if (channelId) {
+        try {
+          await snapshotStore.refreshChannel(channelId);
+        } catch (error) {
+          console.warn('[CharacterCard] Failed to refresh snapshots after template update', error);
+        }
+      }
       message.success('模板已更新');
     } else {
       await templateStore.createTemplate({
@@ -2043,10 +2122,64 @@ defineExpose({ openCardById });
                 <template #unchecked>已关闭</template>
               </n-switch>
             </div>
+          </div>
+        </n-collapse-transition>
+      </div>
+
+      <div class="character-card-settings">
+        <button
+          type="button"
+          class="settings-group-toggle"
+          :aria-expanded="badgeFormatSettingsExpanded"
+          @click="toggleBadgeFormatSettingsExpanded"
+        >
+          <span class="settings-group-toggle__title-wrap">
+            <n-icon size="18" class="settings-group-toggle__icon">
+              <component :is="badgeFormatSettingsToggleIcon" />
+            </n-icon>
+            <span class="settings-group-toggle__title">角色徽标格式</span>
+          </span>
+          <span class="settings-group-toggle__state">{{ badgeFormatSettingsExpanded ? '收起' : '展开' }}</span>
+        </button>
+        <n-collapse-transition :show="badgeFormatSettingsExpanded">
+          <div class="character-card-settings__body">
+            <div class="effective-badge-template">
+              <div class="effective-badge-template__header">
+                <span class="settings-title">实际使用的徽章模板</span>
+                <n-tag
+                  size="small"
+                  :bordered="false"
+                  :type="effectiveBadgeTemplateInfo.source === 'card-template'
+                    ? 'success'
+                    : effectiveBadgeTemplateInfo.source === 'personal'
+                      ? 'info'
+                      : effectiveBadgeTemplateInfo.source === 'disabled'
+                        ? 'warning'
+                        : 'default'"
+                >
+                  {{ effectiveBadgeTemplateInfo.sourceLabel }}
+                </n-tag>
+              </div>
+              <div
+                v-if="effectiveBadgeTemplateInfo.source !== 'disabled'"
+                class="effective-badge-template__value"
+              >
+                {{ effectiveBadgeTemplateInfo.template || '未设置' }}
+              </div>
+              <div
+                v-else
+                class="effective-badge-template__value"
+              >
+                个人徽章策略已关闭，当前角色不显示徽章。
+              </div>
+              <div class="effective-badge-template__priority">
+                优先级：关闭 &gt; 人物卡模板 &gt; 个人兜底 &gt; 频道模板
+              </div>
+            </div>
             <div class="settings-row settings-row--template">
               <div>
-                <p class="settings-title">徽章模板</p>
-                <p class="settings-desc">支持 {属性名} 和 {对象.子项.属性}；单段属性会自动查找嵌套 JSON 中首个同名键。</p>
+                <p class="settings-title">频道徽章模板</p>
+                <p class="settings-desc">人物卡模板和个人兜底均未提供徽章模板时使用。支持 {属性名} 和 {对象.子项.属性}；单段属性会自动查找嵌套 JSON 中首个同名键。</p>
               </div>
               <div class="settings-template-input">
                 <n-input
@@ -2067,7 +2200,7 @@ defineExpose({ openCardById });
               </div>
             </div>
             <div class="settings-row settings-row--template">
-              <p class="settings-title">启用默认模板</p>
+              <p class="settings-title">应用预设徽章模板</p>
               <div class="overlay-template-presets">
                 <n-button size="tiny" :disabled="snapshotTemplateSaving" @click="applyDefaultSnapshotTemplatePreset('shinobigami')">忍神</n-button>
                 <n-button size="tiny" :disabled="snapshotTemplateSaving" @click="applyDefaultSnapshotTemplatePreset('coc')">COC</n-button>
@@ -2075,11 +2208,11 @@ defineExpose({ openCardById });
             </div>
             <div class="settings-row settings-row--template">
               <div>
-                <p class="settings-title">个人徽章模板</p>
-                <p class="settings-desc">只影响自己快照向其他成员展示的徽章。</p>
+                <p class="settings-title">个人徽章策略</p>
+                <p class="settings-desc">仅影响自己的快照；人物卡模板未提供默认徽章时，才使用个人兜底。</p>
               </div>
               <div class="settings-template-input">
-                <n-select v-model:value="personalBadgeTemplateMode" size="small" :options="templateModeOptions" />
+                <n-select v-model:value="personalBadgeTemplateMode" size="small" :options="badgeTemplateModeOptions" />
                 <n-input
                   v-if="personalBadgeTemplateMode === 'custom'"
                   v-model:value="personalBadgeTemplate"
@@ -2920,6 +3053,38 @@ defineExpose({ openCardById });
 
 .settings-template-input--inline {
   min-width: 250px;
+}
+
+.effective-badge-template {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--sc-border-color);
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.08);
+  font-size: 0.8rem;
+}
+
+.effective-badge-template__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.effective-badge-template__value {
+  color: var(--sc-text-secondary);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.effective-badge-template__priority {
+  color: var(--sc-text-secondary);
+  font-size: 0.72rem;
+  opacity: 0.75;
 }
 
 .overlay-template-presets {
