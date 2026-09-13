@@ -92,6 +92,27 @@
                 <div class="iform-card__actions">
                   <n-button quaternary size="tiny" @click="iform.openPanel(form.id)">面板</n-button>
                   <n-button quaternary size="tiny" @click="openFloating(form.id)">弹出</n-button>
+                  <n-tooltip trigger="hover">
+                    <template #trigger>
+                      <n-button quaternary size="tiny" @click="copyInternalLink(form)">
+                        <template #icon><n-icon :component="CopyOutline" /></template>
+                      </n-button>
+                    </template>
+                    <span>复制外部链接</span>
+                  </n-tooltip>
+                  <n-tooltip trigger="hover">
+                    <template #trigger>
+                      <n-button
+                        quaternary
+                        size="tiny"
+                        :disabled="form.allowPopout === false"
+                        @click="popoutInternalLink(form)"
+                      >
+                        <template #icon><n-icon :component="OpenOutline" /></template>
+                      </n-button>
+                    </template>
+                    <span>浏览器弹出</span>
+                  </n-tooltip>
                   <n-button quaternary size="tiny" @click="copyEmbedLink(form)">复制嵌入</n-button>
                   <n-button quaternary size="tiny" :disabled="!iform.canBroadcast" @click="pushSingle(form)">推送</n-button>
                   <n-button quaternary size="tiny" :disabled="!iform.canManage || !canEditForm(form)" @click="openFormModal(form)">编辑</n-button>
@@ -146,7 +167,17 @@
             <n-input v-model:value="formModel.url" placeholder="https://example.com" :disabled="!!editingForm?.templateRef" />
           </n-form-item>
           <n-form-item label="嵌入代码">
-            <n-input type="textarea" v-model:value="formModel.embedCode" placeholder="支持粘贴 HTML / iframe 代码（可含 script）" :rows="3" :disabled="!!editingForm?.templateRef" />
+            <n-space vertical size="small" style="width: 100%;">
+              <input
+                ref="htmlFileInput"
+                type="file"
+                accept=".html,.htm,text/html"
+                hidden
+                @change="handleHtmlUpload"
+              />
+              <n-button size="small" secondary :disabled="!!editingForm?.templateRef" @click="triggerHtmlUpload">上传HTML文件</n-button>
+              <n-input type="textarea" v-model:value="formModel.embedCode" placeholder="支持粘贴 HTML / iframe 代码（可含 script）" :rows="3" :disabled="!!editingForm?.templateRef" />
+            </n-space>
           </n-form-item>
           <n-form-item label="默认尺寸">
             <div class="iform-form__size">
@@ -195,6 +226,13 @@
               </n-switch>
               <n-input v-model:value="formModel.bridgePolicy.allowedOrigins" placeholder="允许来源，逗号分隔（可选）" :disabled="!formModel.bridgePolicy.enabled" />
               <n-input v-model:value="formModel.bridgePolicy.capabilities" placeholder="能力，逗号分隔（storage.read 等）" :disabled="!formModel.bridgePolicy.enabled" />
+              <n-checkbox
+                :checked="hasBridgeCapability('attachments.upload')"
+                :disabled="!formModel.bridgePolicy.enabled"
+                @update:checked="setImageUploadCapability"
+              >
+                上传图片附件（attachments.upload）
+              </n-checkbox>
             </n-space>
           </n-form-item>
           <n-button v-if="editingForm?.templateRef" size="small" tertiary @click="resetTemplateOverrides">恢复模板默认</n-button>
@@ -256,12 +294,18 @@ import { useIFormStore } from '@/stores/iform';
 import { useChatStore } from '@/stores/chat';
 import { useUtilsStore } from '@/stores/utils';
 import { useMessage, useDialog } from 'naive-ui';
-import { TrashOutline } from '@vicons/ionicons5';
+import { CopyOutline, OpenOutline, TrashOutline } from '@vicons/ionicons5';
 import type { ChannelIForm } from '@/types/iform';
 import { copyTextWithFallback } from '@/utils/clipboard';
 import { generateIFormEmbedLink } from '@/utils/iformEmbedLink';
+import {
+  generateInternalSurfaceLink,
+  openInternalSurfaceLink,
+  resolveInternalSurfaceLinkBase,
+} from '@/utils/internalSurfaceLink';
 import { api } from '@/stores/_config';
 import type { ChannelIFormTemplateCatalogItem } from '@/types/iform';
+import { readHtmlFile } from '@/utils/htmlFile';
 
 const iform = useIFormStore();
 const chat = useChatStore();
@@ -301,7 +345,7 @@ const formModel = reactive({
   bridgePolicy: {
     enabled: false,
     allowedOrigins: '',
-    capabilities: 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send',
+    capabilities: 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send,characterCard.read,characterCard.write,attachments.upload',
   },
 });
 
@@ -317,6 +361,19 @@ const templatePage = ref(1);
 const templatePageSize = 30;
 const templateTotal = ref(0);
 const importInput = ref<HTMLInputElement | null>(null);
+const htmlFileInput = ref<HTMLInputElement | null>(null);
+
+const hasBridgeCapability = (capability: string) => formModel.bridgePolicy.capabilities
+  .split(',').map((item) => item.trim()).filter(Boolean).includes(capability);
+
+const toggleBridgeCapability = (capability: string, enabled: boolean) => {
+  const capabilities = new Set(formModel.bridgePolicy.capabilities.split(',').map((item) => item.trim()).filter(Boolean));
+  if (enabled) capabilities.add(capability);
+  else capabilities.delete(capability);
+  formModel.bridgePolicy.capabilities = [...capabilities].join(',');
+};
+
+const setImageUploadCapability = (enabled: boolean) => toggleBridgeCapability('attachments.upload', enabled);
 
 const channelOptions = computed(() => flattenChannels(chat.channelTree || [], chat.curChannel?.id));
 
@@ -356,7 +413,7 @@ const resetFormModel = () => {
     bridgePolicy: {
       enabled: false,
       allowedOrigins: '',
-      capabilities: 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send',
+      capabilities: 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send,characterCard.read,characterCard.write,attachments.upload',
     },
   });
 };
@@ -396,6 +453,25 @@ const openFormModal = (form?: ChannelIForm) => {
     resetFormModel();
   }
   formModalVisible.value = true;
+};
+
+const triggerHtmlUpload = () => {
+  if (!htmlFileInput.value) return;
+  htmlFileInput.value.value = '';
+  htmlFileInput.value.click();
+};
+
+const handleHtmlUpload = async (event: Event) => {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  try {
+    formModel.embedCode = await readHtmlFile(file);
+    message.success('HTML 文件已读取');
+  } catch (error: any) {
+    message.error(error?.message || '读取 HTML 文件失败');
+  }
 };
 
 const handleSubmit = async () => {
@@ -561,6 +637,40 @@ const copyEmbedLink = async (form: ChannelIForm) => {
   } else {
     message.error('复制失败');
   }
+};
+
+const getInternalLink = (form: ChannelIForm) => {
+  const worldId = String(chat.currentWorldId || '').trim();
+  const channelId = String(iform.visibleChannelId || chat.curChannel?.id || '').trim();
+  if (!worldId || !channelId || !form?.id) {
+    message.warning('无法生成外部链接');
+    return null;
+  }
+  return generateInternalSurfaceLink({
+    type: 'iform',
+    id: form.id,
+    worldId,
+    channelId,
+  }, { base: resolveInternalSurfaceLinkBase(utils.config) });
+};
+
+const popoutInternalLink = (form: ChannelIForm) => {
+  const link = getInternalLink(form);
+  if (!link) return;
+  const opened = openInternalSurfaceLink(link, {
+    width: form.defaultWidth,
+    height: form.defaultHeight,
+  });
+  if (!opened) {
+    message.error('弹出失败，请允许浏览器弹窗');
+  }
+};
+
+const copyInternalLink = async (form: ChannelIForm) => {
+  const link = getInternalLink(form);
+  if (!link) return;
+  const copied = await copyTextWithFallback(link);
+  copied ? message.success('外部链接已复制') : message.error('复制失败');
 };
 
 const pushSingle = async (form: ChannelIForm) => {

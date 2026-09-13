@@ -2,9 +2,10 @@ import { watch, type WatchStopHandle } from 'vue'
 
 import { api } from '@/stores/_config'
 import { chatEvent } from '@/stores/chat'
-import type { SceneFolder, StageActionTriggeredPayload, StageDrawing, StageImageRef, StageLiveState, StageObject, StageObjectType, StagePointerTrace, StagePointerTraceInput, StageScene, StageSurfaceFit, StageWorkspaceState } from '../shared/stage-types'
-import { isSafeStageImageUrl, normalizeStageAudioRef, normalizeStageEntranceConfig, normalizeStageImageAnnotation, normalizeStageMusicSnapshot, normalizeStageSceneTransition, normalizeStageSurfaceStyle } from '../shared/stage-types'
+import type { SceneFolder, StageAction, StageActionTriggeredPayload, StageClueActionEntry, StageDrawing, StageImageRef, StageLiveState, StageObject, StageObjectType, StagePointerTrace, StagePointerTraceInput, StageScene, StageSurfaceFit, StageWorkspaceState } from '../shared/stage-types'
+import { isSafeStageImageUrl, normalizeStageAudioRef, normalizeStageEntranceConfig, normalizeStageImageAnnotation, normalizeStageMusicSnapshot, normalizeStageSceneOverlays, normalizeStageSceneTransition, normalizeStageSurfaceStyle } from '../shared/stage-types'
 import { createInitialTheaterStageState, type TheaterStageStore } from '../stage/StageStore'
+import { STAGE_ACTION_CANCELLED } from '../stage/theater-action-sequence-runtime'
 import { stageActionSchema } from '../bridge/theater-bridge-protocol'
 
 type JsonObject = Record<string, unknown>
@@ -44,6 +45,7 @@ interface TheaterSceneSnapshot {
   order: number
   folderId?: string
   locked: boolean
+  published: boolean
   state: JsonObject
   objects: Record<string, TheaterObjectSnapshot>
 }
@@ -122,6 +124,11 @@ interface TheaterSyncOptions {
   onSceneAudioTriggered?: (assetId: string, volume: number, triggerId: string, sceneId: string) => void
   onVisibilityTriggered?: (changes: TheaterVisibilityChange[], triggerId: string) => void
   onError?: (message: string) => void
+  confirmClueEntry?: (entry: StageClueActionEntry) => Promise<boolean>
+}
+
+type ClueStageActionTriggeredPayload = Omit<StageActionTriggeredPayload, 'action'> & {
+  action: Extract<StageAction, { type: 'clue.execute' }>
 }
 
 const clone = <T>(value: T): T => structuredClone(value)
@@ -175,9 +182,16 @@ const mergeThreeWay = (base: unknown, local: unknown, remote: unknown): unknown 
   return result
 }
 
-const rebaseDocument = (base: TheaterDocument, local: TheaterDocument, remote: TheaterDocument): TheaterDocument => (
-  mergeThreeWay(base, local, remote) as TheaterDocument
-)
+const rebaseDocument = (base: TheaterDocument, local: TheaterDocument, remote: TheaterDocument): TheaterDocument => {
+  const result = mergeThreeWay(base, local, remote) as TheaterDocument
+  if (!result.activeSceneId || !result.scenes[result.activeSceneId]) {
+    result.activeSceneId = remote.activeSceneId && result.scenes[remote.activeSceneId]
+      ? remote.activeSceneId
+      : Object.values(result.scenes).sort((left, right) => left.order - right.order)[0]?.id || null
+    if (result.activeSceneId === remote.activeSceneId) result.liveState = clone(remote.liveState)
+  }
+  return result
+}
 
 const imageRef = (value: unknown): StageImageRef | null => {
   const raw = asObject(value)
@@ -244,6 +258,7 @@ const stageStateFromServer = (value: unknown, objects: Record<string, StageObjec
     transition: normalizeStageSceneTransition(raw.transition),
     switchAudio: normalizeStageAudioRef(raw.switchAudio),
     musicSnapshot: normalizeStageMusicSnapshot(raw.musicSnapshot),
+    sceneOverlays: normalizeStageSceneOverlays(raw.sceneOverlays),
     serverState: sceneStateExtensionsFromRaw(raw),
   }
 }
@@ -266,13 +281,14 @@ const serverStateFromStage = (state: StageLiveState): JsonObject => ({
   transition: state.transition,
   switchAudio: state.switchAudio,
   musicSnapshot: state.musicSnapshot,
+  sceneOverlays: clone(state.sceneOverlays),
 })
 
 const objectFromServer = (value: TheaterObjectSnapshot): StageObject | null => {
   const content = asObject(value.content)
   const metadata = asObject(value.metadata)
   const legacyScale = finite(value.scale, 1) > 0 ? Math.min(100, finite(value.scale, 1)) : 1
-  const kind = ['group', 'drawing', 'text', 'image', 'button', 'character', 'video', 'effect'].includes(value.kind)
+  const kind = ['group', 'drawing', 'text', 'image', 'button', 'character', 'video', 'effect', 'iframe'].includes(value.kind)
     ? value.kind as StageObjectType
     : null
   if (!kind) return null
@@ -297,7 +313,7 @@ const objectFromServer = (value: TheaterObjectSnapshot): StageObject | null => {
     },
     visible: value.visible !== false,
     locked: value.locked === true,
-    aspectRatioLocked: value.aspectRatioLocked !== false,
+    aspectRatioLocked: kind === 'iframe' ? value.aspectRatioLocked === true : value.aspectRatioLocked !== false,
     interactive: structuralGroup ? false : value.interactive !== false,
     editable: structuralGroup ? false : value.editable === true,
     fill: typeof content.fill === 'string' ? content.fill : '#60a5fa',
@@ -378,6 +394,7 @@ const normalizeDocument = (snapshot: TheaterSnapshotResponse['snapshot']): Theat
     id,
     switchText: normalizeSwitchText(scene.switchText),
     folderId: typeof scene.folderId === 'string' && scene.folderId.trim() ? scene.folderId.trim() : undefined,
+    published: scene.published === true,
     state: serverStateFromStage(stageStateFromServer(scene.state, {})),
     objects: normalizeObjectSnapshots(scene.objects, id),
   }])),
@@ -395,6 +412,7 @@ const documentFromWorkspace = (workspace: StageWorkspaceState): TheaterDocument 
     order: scene.order,
     ...(scene.folderId ? { folderId: scene.folderId } : {}),
     locked: scene.locked,
+    published: scene.published,
     state: serverStateFromStage(scene.state),
     objects: Object.fromEntries(Object.values(scene.state.sceneObjects).map((object) => [
       object.id,
@@ -425,6 +443,7 @@ const workspaceFromDocument = (document: TheaterDocument): StageWorkspaceState =
       order: scene.order,
       ...(scene.folderId ? { folderId: scene.folderId } : {}),
       locked: scene.locked,
+      published: scene.published,
       state: stageStateFromServer(scene.state, objects),
     }
     return [scene.id, value]
@@ -564,11 +583,18 @@ const diffDocuments = (before: TheaterDocument, after: TheaterDocument): Theater
   Object.values(after.scenes)
     .filter((scene) => !before.scenes[scene.id])
     .sort((left, right) => left.order - right.order)
-    .forEach((scene) => mutations.push({
-      type: 'scene.create',
-      permission: 'stage.object.edit',
-      payload: { sceneId: scene.id, name: scene.name, switchText: scene.switchText, order: scene.order, ...(scene.folderId ? { folderId: scene.folderId } : {}), state: scene.state },
-    }))
+    .forEach((scene) => {
+      mutations.push({
+        type: 'scene.create',
+        permission: 'stage.object.edit',
+        payload: { sceneId: scene.id, name: scene.name, switchText: scene.switchText, order: scene.order, ...(scene.folderId ? { folderId: scene.folderId } : {}), state: scene.state },
+      })
+      if (scene.published) mutations.push({
+        type: 'scene.update',
+        permission: 'stage.object.edit',
+        payload: { sceneId: scene.id, fields: { published: true } },
+      })
+    })
 
   Object.values(after.scenes).forEach((scene) => {
     const previous = before.scenes[scene.id]
@@ -579,6 +605,7 @@ const diffDocuments = (before: TheaterDocument, after: TheaterDocument): Theater
     if ((scene.folderId || '') !== (previous.folderId || '')) fields.folderId = scene.folderId || ''
     if (!sceneOrderChanged && scene.order !== previous.order) fields.order = scene.order
     if (scene.locked !== previous.locked) fields.locked = scene.locked
+    if (scene.published !== previous.published) fields.published = scene.published
     if (!same(scene.state, previous.state)) fields.state = scene.state
     if (Object.keys(fields).length) mutations.push({
       type: 'scene.update',
@@ -673,6 +700,12 @@ const canApplyMutation = (mutation: TheaterMutation, permissions: string[], base
   })
 }
 
+const filterLocalSceneBrowsingMutations = (mutations: TheaterMutation[], permissions: string[]) => (
+  permissions.includes('stage.scene.switch')
+    ? mutations
+    : mutations.filter((mutation) => mutation.type !== 'scene.apply')
+)
+
 const filterDelegatedMutation = (mutation: TheaterMutation, baseDocument: TheaterDocument): TheaterMutation | null => {
   if (mutation.type !== 'object.update' && mutation.type !== 'object.batchUpdate') return null
   const objects = allObjects(baseDocument)
@@ -715,6 +748,7 @@ const isPermissionDenied = (error: unknown) => {
 }
 
 export class TheaterSyncClient {
+  private inputChannelId: string
   private revision = 0
   private schemaVersion = 1
   private permissions: string[] = []
@@ -734,6 +768,7 @@ export class TheaterSyncClient {
   private pendingEffectTriggers = new Map<string, { effectId: string, sceneId: string, revision: number, expiresAt: number }>()
   private pendingSceneAudioTriggers = new Map<string, { assetId: string, volume: number, sceneId: string, revision: number, expiresAt: number }>()
   private consecutiveConflicts = 0
+  private readonly runningClueExecutions = new Set<string>()
 
   private theaterBase() {
     if (this.options.scopeType === 'world' || !this.options.channelId) {
@@ -867,7 +902,13 @@ export class TheaterSyncClient {
     void this.subscribe()
   }
 
-  constructor(private readonly options: TheaterSyncOptions) {}
+  constructor(private readonly options: TheaterSyncOptions) {
+    this.inputChannelId = options.inputChannelId || options.channelId
+  }
+
+  setInputChannelId(channelId: string) {
+    this.inputChannelId = channelId.trim()
+  }
 
   async start() {
     if (this.started) return
@@ -907,6 +948,7 @@ export class TheaterSyncClient {
     this.reconcileTimer = null
     this.pendingEffectTriggers.clear()
     this.pendingSceneAudioTriggers.clear()
+    this.runningClueExecutions.clear()
     chatEvent.off('theater.snapshot' as any, this.onGatewayEvent)
     chatEvent.off('theater.mutation.applied' as any, this.onGatewayEvent)
     chatEvent.off('theater.mutation.rejected' as any, this.onGatewayEvent)
@@ -924,6 +966,7 @@ export class TheaterSyncClient {
   }
 
   async triggerAction(payload: StageActionTriggeredPayload) {
+    if (payload.action.type === 'clue.execute') return this.triggerClueExecute(payload as ClueStageActionTriggeredPayload)
     if (payload.action.type !== 'scene.apply' && payload.action.type !== 'object.toggle' && payload.action.type !== 'effect.play') {
       return this.triggerActionNow(payload)
     }
@@ -1027,7 +1070,7 @@ export class TheaterSyncClient {
     await this.options.sendGatewayAPI('theater.pointer', {
       worldId: this.options.worldId,
       channelId: this.options.scopeType === 'world' ? '' : this.options.channelId,
-      inputChannelId: this.options.inputChannelId || this.options.channelId,
+      inputChannelId: this.inputChannelId || this.options.channelId,
       traceId: trace.traceId,
       identityId: trace.identityId,
       variantId: trace.variantId || '',
@@ -1076,13 +1119,39 @@ export class TheaterSyncClient {
     return true
   }
 
-  private postAction(payload: StageActionTriggeredPayload) {
+  private async triggerClueExecute(payload: ClueStageActionTriggeredPayload) {
+    const key = `${payload.objectId}:${payload.actionId}:${payload.stepId || ''}`
+    if (this.runningClueExecutions.has(key)) return true
+    this.runningClueExecutions.add(key)
+    try {
+      for (const entry of payload.action.payload.entries) {
+        if (entry.confirm) {
+          const confirmed = this.options.confirmClueEntry
+            ? await this.options.confirmClueEntry(entry)
+            : false
+          if (!confirmed) return STAGE_ACTION_CANCELLED
+        }
+        await this.waitForSaving()
+        await this.flushNow()
+        await this.waitForSaving()
+        // Clue entries are intentionally not retried: a failed request stops the
+        // local sequence and must remain visible to the caller.
+        await this.postAction(payload, entry.id)
+      }
+      return true
+    } finally {
+      this.runningClueExecutions.delete(key)
+    }
+  }
+
+  private postAction(payload: StageActionTriggeredPayload, entryId?: string) {
     return api.post(`${this.theaterBase()}/actions/trigger`, {
       actionRequestId: mutationId('action'),
       objectId: payload.objectId,
       actionId: payload.actionId,
       ...(payload.stepId ? { stepId: payload.stepId } : {}),
-      inputChannelId: this.options.inputChannelId || this.options.channelId,
+      ...(entryId ? { entryId } : {}),
+      inputChannelId: this.inputChannelId || this.options.channelId,
       expectedRevision: this.revision,
     })
   }
@@ -1219,6 +1288,7 @@ export class TheaterSyncClient {
     const desired = documentFromWorkspace(this.options.store.getSnapshot())
     const baseAtFlush = clone(this.baseDocument)
     let mutations = diffDocuments(this.baseDocument, desired)
+    mutations = filterLocalSceneBrowsingMutations(mutations, this.permissions)
     if (this.permissions.includes('stage.object.edit.delegated') && !this.permissions.includes('stage.object.edit')) {
       mutations = mutations.flatMap((mutation) => {
         const filtered = filterDelegatedMutation(mutation, this.baseDocument)
@@ -1256,7 +1326,9 @@ export class TheaterSyncClient {
         if (!this.started) return
         this.revision = finite(response.data?.revision, this.revision + 1)
       }
-      this.baseDocument = desired
+      this.baseDocument = this.permissions.includes('stage.scene.switch')
+        ? desired
+        : { ...desired, activeSceneId: baseAtFlush.activeSceneId, liveState: baseAtFlush.liveState }
       this.consecutiveConflicts = 0
     } catch (error) {
       if (!this.started) return
@@ -1282,9 +1354,13 @@ export class TheaterSyncClient {
       this.options.onSyncingChange?.(false)
       const shouldReload = this.pendingRemoteRevision > this.revision
       this.pendingRemoteRevision = 0
+      const remainingMutations = filterLocalSceneBrowsingMutations(
+        diffDocuments(this.baseDocument, documentFromWorkspace(this.options.store.getSnapshot())),
+        this.permissions,
+      )
       const hasLocalChanges = this.flushAgain
         || Boolean(this.flushTimer)
-        || diffDocuments(this.baseDocument, documentFromWorkspace(this.options.store.getSnapshot())).length > 0
+        || remainingMutations.length > 0
       if (shouldReload && !hasLocalChanges) await this.reload()
       if (this.flushAgain) {
         this.flushAgain = false
@@ -1298,6 +1374,7 @@ export const theaterSyncTesting = {
   canApplyMutation,
   diffDocuments,
   documentFromWorkspace,
+  filterLocalSceneBrowsingMutations,
   normalizeDocument,
   rebaseDocument,
   serverStateFromStage,

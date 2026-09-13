@@ -42,11 +42,13 @@ const worldTemplate = computed(() => {
 
 const template = computed(() => {
   const worldId = chatStore.currentWorldId;
-  if (badgeEntry.value?.platformTemplateRef) return badgeEntry.value.template;
+  if (badgeEntry.value?.disabled) return '';
+  if (badgeEntry.value?.effective && badgeEntry.value.template) return badgeEntry.value.template;
   if (worldTemplate.value) return worldTemplate.value;
-  return badgeEntry.value?.template
-    || displayStore.settings.characterCardBadgeTemplateByWorld?.[worldId]
-    || getWorldCardTemplate(worldId);
+  const displayWorldTemplate = displayStore.settings.characterCardBadgeTemplateByWorld?.[worldId];
+  if (displayWorldTemplate) return displayWorldTemplate;
+  if (!badgeEntry.value?.effective && badgeEntry.value?.template) return badgeEntry.value.template;
+  return getWorldCardTemplate(worldId);
 });
 
 const resolvedAttrs = computed<Record<string, any> | undefined>(() => {
@@ -65,6 +67,7 @@ const renderedContent = computed(() => {
 });
 
 const isVisible = computed(() => {
+  if (badgeEntry.value?.disabled) return false;
   return displayStore.settings.characterCardBadgeEnabled
     && !cardStore.isNarratorIdentity(chatStore.curChannel?.id || '', props.identityId || '')
     && messageVisibilityScopeMatches(

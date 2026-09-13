@@ -89,17 +89,28 @@ func projectTheaterSnapshotForMember(snapshot TheaterSharedSnapshot) (TheaterSha
 	projected := TheaterSharedSnapshot{
 		ActiveSceneID:     snapshot.ActiveSceneID,
 		LiveState:         snapshot.LiveState,
-		SceneFolders:      snapshot.SceneFolders,
 		Scenes:            map[string]TheaterSceneSnapshot{},
 		PersistentObjects: projectTheaterObjectsForMember(snapshot.PersistentObjects),
 		Characters:        map[string]TheaterObjectSnapshot{},
 		Resources:         map[string]TheaterResourcePublic{},
 	}
-	if snapshot.ActiveSceneID != nil {
-		if scene, ok := snapshot.Scenes[*snapshot.ActiveSceneID]; ok {
-			scene.SwitchText = ""
-			scene.Objects = projectTheaterObjectsForMember(scene.Objects)
-			projected.Scenes[scene.ID] = scene
+	for _, scene := range snapshot.Scenes {
+		if (snapshot.ActiveSceneID == nil || scene.ID != *snapshot.ActiveSceneID) && !scene.Published {
+			continue
+		}
+		scene.SwitchText = ""
+		scene.Objects = projectTheaterObjectsForMember(scene.Objects)
+		projected.Scenes[scene.ID] = scene
+	}
+	visibleFolderIDs := map[string]bool{}
+	for _, scene := range projected.Scenes {
+		if scene.FolderID != "" {
+			visibleFolderIDs[scene.FolderID] = true
+		}
+	}
+	for _, folder := range snapshot.SceneFolders {
+		if visibleFolderIDs[folder.ID] {
+			projected.SceneFolders = append(projected.SceneFolders, folder)
 		}
 	}
 	referencedResources := map[string]int64{}
@@ -213,6 +224,20 @@ func redactTheaterActionsForMember(raw json.RawMessage) json.RawMessage {
 			action["payload"] = map[string]any{"effectId": "redacted"}
 		case TheaterMutationObjectToggle:
 			action["payload"] = map[string]any{"objectId": "redacted"}
+		case "clue.execute":
+			action["payload"] = redactedTheaterCluePayload()
+		case "action.sequence":
+			if payload, ok := action["payload"].(map[string]any); ok {
+				if steps, ok := payload["steps"].([]any); ok {
+					for _, rawStep := range steps {
+						if step, ok := rawStep.(map[string]any); ok {
+							if nested, ok := step["action"].(map[string]any); ok && nested["type"] == "clue.execute" {
+								step["action"] = map[string]any{"type": "clue.execute", "payload": redactedTheaterCluePayload()}
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 	result, err := json.Marshal(actions)
@@ -220,6 +245,10 @@ func redactTheaterActionsForMember(raw json.RawMessage) json.RawMessage {
 		return json.RawMessage(`[]`)
 	}
 	return result
+}
+
+func redactedTheaterCluePayload() map[string]any {
+	return map[string]any{"version": 1, "entries": []map[string]any{{"id": "redacted-entry", "clueId": "redacted-clue", "targets": []map[string]any{}, "present": false, "confirm": false}}}
 }
 
 func RestoreTheaterSnapshot(ctx context.Context, actorID string, command TheaterRestoreCommand, meta TheaterRequestMeta) (*TheaterMutationResult, error) {
@@ -472,7 +501,7 @@ func replaceTheaterRows(tx *gorm.DB, room *model.TheaterRoomModel, actorID strin
 		return err
 	}
 	for id, scene := range snapshot.Scenes {
-		row := model.TheaterSceneModel{StringPKBaseModel: model.StringPKBaseModel{ID: id}, RoomID: room.ID, Name: scene.Name, SwitchText: scene.SwitchText, SortOrder: scene.Order, FolderID: scene.FolderID, Locked: scene.Locked, StateJSON: defaultJSON(scene.State, `{}`), SchemaVersion: model.TheaterSchemaVersion, CreatedBy: actorID, UpdatedBy: actorID}
+		row := model.TheaterSceneModel{StringPKBaseModel: model.StringPKBaseModel{ID: id}, RoomID: room.ID, Name: scene.Name, SwitchText: scene.SwitchText, SortOrder: scene.Order, FolderID: scene.FolderID, Locked: scene.Locked, Published: scene.Published, StateJSON: defaultJSON(scene.State, `{}`), SchemaVersion: model.TheaterSchemaVersion, CreatedBy: actorID, UpdatedBy: actorID}
 		if err := tx.Create(&row).Error; err != nil {
 			return err
 		}
@@ -588,7 +617,7 @@ func buildTheaterSnapshot(conn *gorm.DB, room *model.TheaterRoomModel, includeRe
 		return result, "", err
 	}
 	for _, scene := range scenes {
-		result.Scenes[scene.ID] = TheaterSceneSnapshot{ID: scene.ID, Name: scene.Name, SwitchText: scene.SwitchText, Order: scene.SortOrder, FolderID: scene.FolderID, Locked: scene.Locked, State: normalizedTheaterSceneStateJSON(scene.StateJSON), Objects: map[string]TheaterObjectSnapshot{}}
+		result.Scenes[scene.ID] = TheaterSceneSnapshot{ID: scene.ID, Name: scene.Name, SwitchText: scene.SwitchText, Order: scene.SortOrder, FolderID: scene.FolderID, Locked: scene.Locked, Published: scene.Published, State: normalizedTheaterSceneStateJSON(scene.StateJSON), Objects: map[string]TheaterObjectSnapshot{}}
 	}
 	var objects []model.TheaterObjectModel
 	if err := conn.Where("room_id = ?", room.ID).Order("order_key ASC, id ASC").Find(&objects).Error; err != nil {

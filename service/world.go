@@ -832,6 +832,12 @@ func WorldDelete(worldID, actorID string) error {
 		if err := ArchiveAnnouncementsByScope(tx, model.AnnouncementScopeWorld, worldID); err != nil {
 			return err
 		}
+		if err := archiveWorldClues(tx, worldID); err != nil {
+			return err
+		}
+		if err := CleanupWorldClueBoardsForWorld(tx, worldID); err != nil {
+			return err
+		}
 		return nil
 	})
 }
@@ -887,6 +893,12 @@ func WorldLeave(worldID, userID string) error {
 			return err
 		}
 		if err := tx.Where("world_id = ? AND user_id = ?", worldID, userID).Delete(&model.WorldArchiveModel{}).Error; err != nil {
+			return err
+		}
+		if err := cleanupWorldCluesForMember(tx, worldID, userID); err != nil {
+			return err
+		}
+		if err := CleanupWorldClueBoardForMember(tx, worldID, userID); err != nil {
 			return err
 		}
 		return nil

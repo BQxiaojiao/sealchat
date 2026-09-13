@@ -35,6 +35,7 @@ var supportedExportFormats = map[string]struct{}{
 	"json": {},
 	"txt":  {},
 	"html": {},
+	"docx": {},
 }
 
 // ExportJobOptions 聚合创建导出任务所需的信息。
@@ -48,6 +49,7 @@ type ExportJobOptions struct {
 	IncludeImages             bool
 	IncludeDiceCommand        bool
 	WithoutTimestamp          bool
+	WithoutOOCParentheses     bool
 	MergeMessages             bool
 	AutoCorrectPunctuation    bool
 	StartTime                 *time.Time
@@ -70,6 +72,7 @@ type exportExtraOptions struct {
 	AutoCorrectPunctuation    bool              `json:"auto_correct_punctuation"`
 	IncludeImages             bool              `json:"include_images"`
 	IncludeDiceCommand        bool              `json:"include_dice_commands"`
+	WithoutOOCParentheses     bool              `json:"without_ooc_parentheses,omitempty"`
 	BatchChannelIDs           []string          `json:"batch_channel_ids,omitempty"`
 	BatchFormat               string            `json:"batch_format,omitempty"`
 }
@@ -513,7 +516,7 @@ func mergeSequentialMessagesForExport(messages []*model.MessageModel, extra *exp
 			continue
 		}
 
-		formatted := formatContentForMerge(msg)
+		formatted := formatContentForMergeWithOption(msg, extra != nil && extra.WithoutOOCParentheses)
 		if current == nil {
 			current = cloneMessage(msg)
 			current.Content = formatted
@@ -527,7 +530,8 @@ func mergeSequentialMessagesForExport(messages []*model.MessageModel, extra *exp
 		}
 
 		allowFilteredOOCGapMerge := sawFilteredOOCGap && !sawOtherFilteredGap
-		if canMerge(current, currentIcMode, lastTime, msg, mergeWindow, allowFilteredOOCGapMerge) {
+		if !isStandaloneExportEmbedMessage(current.Content) && !isStandaloneExportEmbedMessage(msg.Content) &&
+			canMerge(current, currentIcMode, lastTime, msg, mergeWindow, allowFilteredOOCGapMerge) {
 			nextContent := strings.TrimLeft(formatted, "\r\n")
 			trimmed := strings.TrimRight(current.Content, " \r\n\t")
 			if trimmed == "" {
@@ -650,6 +654,7 @@ func buildExportExtraOptions(opts *ExportJobOptions) (string, error) {
 		AutoCorrectPunctuation:    opts.AutoCorrectPunctuation,
 		IncludeImages:             opts.IncludeImages,
 		IncludeDiceCommand:        opts.IncludeDiceCommand,
+		WithoutOOCParentheses:     opts.WithoutOOCParentheses,
 	}
 	if len(opts.DisplaySettings) > 0 {
 		extra.DisplaySettings = opts.DisplaySettings
@@ -660,6 +665,7 @@ func buildExportExtraOptions(opts *ExportJobOptions) (string, error) {
 		!extra.TextColorizeBBCode &&
 		len(extra.TextColorizeBBCodeMap) == 0 &&
 		len(extra.TextColorizeBBCodeNameMap) == 0 &&
+		!extra.WithoutOOCParentheses &&
 		extra.AutoCorrectPunctuation &&
 		extra.IncludeImages &&
 		extra.IncludeDiceCommand {
@@ -715,6 +721,30 @@ func cloneStringMap(values map[string]string) map[string]string {
 	return cloned
 }
 
+// loadExportColorOverrides reads the existing profile format for DOCX batch
+// children. It is deliberately read-only and keeps the API package out of the
+// service layer.
+func loadExportColorOverrides(userID, channelID string) (map[string]string, map[string]string) {
+	if model.GetDB() == nil {
+		return nil, nil
+	}
+	colors := map[string]string{}
+	names := map[string]string{}
+	profiles, _, _, err := LoadExportColorProfile(userID, channelID)
+	if err != nil {
+		return nil, nil
+	}
+	for key, profile := range profiles {
+		if profile.Color != "" {
+			colors[key] = profile.Color
+		}
+		if profile.Name != "" {
+			names[key] = profile.Name
+		}
+	}
+	return colors, names
+}
+
 func cloneMessage(msg *model.MessageModel) *model.MessageModel {
 	if msg == nil {
 		return nil
@@ -724,10 +754,14 @@ func cloneMessage(msg *model.MessageModel) *model.MessageModel {
 }
 
 func formatContentForMerge(msg *model.MessageModel) string {
+	return formatContentForMergeWithOption(msg, false)
+}
+
+func formatContentForMergeWithOption(msg *model.MessageModel, withoutOOCParentheses bool) string {
 	if msg == nil {
 		return ""
 	}
-	if strings.EqualFold(normalizeIcMode(msg.ICMode), "ooc") {
+	if !withoutOOCParentheses && strings.EqualFold(normalizeIcMode(msg.ICMode), "ooc") {
 		return ensureOOCWrapped(msg.Content)
 	}
 	return msg.Content
@@ -873,6 +907,7 @@ func RetryMessageExportJob(job *model.MessageExportJobModel) (*model.MessageExpo
 		IncludeOOC:             job.IncludeOOC,
 		IncludeArchived:        job.IncludeArchived,
 		WithoutTimestamp:       job.WithoutTimestamp,
+		WithoutOOCParentheses:  extra.WithoutOOCParentheses,
 		MergeMessages:          job.MergeMessages,
 		AutoCorrectPunctuation: extra.AutoCorrectPunctuation,
 		StartTime:              job.StartTime,
@@ -883,6 +918,9 @@ func RetryMessageExportJob(job *model.MessageExportJobModel) (*model.MessageExpo
 	opts.MaxConcurrency = extra.MaxConcurrency
 	opts.IncludeImages = extra.IncludeImages
 	opts.IncludeDiceCommand = extra.IncludeDiceCommand
+	opts.TextColorizeBBCode = extra.TextColorizeBBCode
+	opts.TextColorizeBBCodeMap = cloneStringMap(extra.TextColorizeBBCodeMap)
+	opts.TextColorizeBBCodeNameMap = cloneStringMap(extra.TextColorizeBBCodeNameMap)
 	if len(extra.BatchChannelIDs) > 0 {
 		opts.Format = extra.BatchFormat
 		return CreateBatchMessageExportJob(opts, extra.BatchChannelIDs)

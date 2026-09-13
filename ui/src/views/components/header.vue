@@ -2,8 +2,8 @@
 import { chatEvent, useChatStore } from '@/stores/chat';
 import { useUserStore } from '@/stores/user';
 import { api } from '@/stores/_config';
-import { LayoutSidebarLeftCollapse, LayoutSidebarLeftExpand, Plus, Users, Link, Refresh, Palette, Photo, Send } from '@vicons/tabler';
-import { AppsOutline, MusicalNotesOutline, SearchOutline, UnlinkOutline, BrowsersOutline, NotificationsOutline, DocumentTextOutline } from '@vicons/ionicons5';
+import { LayoutSidebarLeftCollapse, LayoutSidebarLeftExpand, Plus, Users, Palette, Photo, Send } from '@vicons/tabler';
+import { AppsOutline, MusicalNotesOutline, SearchOutline, BrowsersOutline, NotificationsOutline, DocumentTextOutline } from '@vicons/ionicons5';
 import { NIcon, useDialog, useMessage } from 'naive-ui';
 import { computed, ref, shallowRef, type Component, h, defineAsyncComponent, onBeforeUnmount, onMounted, watch, withDefaults } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
@@ -563,8 +563,11 @@ const newChannel = async () => {
 }
 
 const presencePopoverVisible = ref(false);
+const observerCount = ref(0);
 const actionRibbonActive = ref(false);
 const onlineMembersCount = computed(() => chat.curChannelUsers.length);
+const connectionRecoveryPulseKey = ref(0);
+const onlineBadgeAnimationKey = ref(0);
 const PRESENCE_POPOVER_REFRESH_INTERVAL_MS = 5000;
 let presencePopoverRefreshTimer: number | null = null;
 let presencePopoverRefreshInFlight: Promise<void> | null = null;
@@ -589,39 +592,61 @@ const connectionStatus = computed(() => {
   switch (chat.connectState) {
     case 'connected':
       return {
-        icon: Link,
-        classes: 'text-green-600',
+        state: 'connected' as const,
         label: t('connectState.connected'),
         spinning: false,
       };
     case 'connecting':
       return {
-        icon: Refresh,
-        classes: 'text-sky-600',
+        state: 'connecting' as const,
         label: t('connectState.connecting'),
         spinning: true,
       };
     case 'reconnecting':
       return {
-        icon: Refresh,
-        classes: 'text-orange-500',
+        state: 'reconnecting' as const,
         label: t('connectState.reconnecting', [chat.iReconnectAfterTime]),
         spinning: true,
       };
     case 'disconnected':
       return {
-        icon: UnlinkOutline,
-        classes: 'text-red-600',
+        state: 'disconnected' as const,
         label: t('connectState.disconnected'),
         spinning: false,
       };
     default:
       return {
-        icon: Link,
-        classes: 'text-gray-400',
+        state: 'connecting' as const,
         label: t('connectState.connecting'),
-        spinning: false,
+        spinning: true,
       };
+  }
+});
+
+const connectionLatencyMs = computed(() => {
+  const latency = Number(chat.lastLatencyMs);
+  return Number.isFinite(latency) && latency > 0 ? Math.round(latency) : undefined;
+});
+
+const presenceTooltipLabel = computed(() => {
+  if (connectionStatus.value.state === 'disconnected') {
+    return connectionStatus.value.label;
+  }
+  return `${connectionStatus.value.label} · ${onlineMembersCount.value} 人在线`;
+});
+
+watch(
+  () => chat.connectState,
+  (state, previousState) => {
+    if (state === 'connected' && previousState && previousState !== 'connected') {
+      connectionRecoveryPulseKey.value += 1;
+    }
+  },
+);
+
+watch(onlineMembersCount, (count, previousCount) => {
+  if (typeof previousCount === 'number' && count !== previousCount) {
+    onlineBadgeAnimationKey.value += 1;
   }
 });
 
@@ -636,6 +661,7 @@ const handlePresenceRefresh = async (options?: { silent?: boolean }) => {
     try {
       const channelId = chat.curChannel?.id ? String(chat.curChannel.id) : '';
       if (!channelId) {
+        observerCount.value = 0;
         chat.curChannelUsers = [];
         chat.clearPresenceMap();
         if (!silent) {
@@ -645,10 +671,20 @@ const handlePresenceRefresh = async (options?: { silent?: boolean }) => {
       }
 
       const onlineResp = await chat.sendAPI<any>('channel.member.list.online', { channel_id: channelId } as any);
+      if (String(chat.curChannel?.id || '') !== channelId) {
+        return;
+      }
       const onlineItems = Array.isArray(onlineResp?.data?.data) ? onlineResp.data.data : [];
       chat.curChannelUsers = onlineItems;
 
-      const data = await chat.getChannelPresence();
+      const data = await chat.getChannelPresence(channelId);
+      if (String(chat.curChannel?.id || '') !== channelId) {
+        return;
+      }
+      const rawObserverCount = Number(data?.observer_count);
+      observerCount.value = Number.isFinite(rawObserverCount) && rawObserverCount > 0
+        ? Math.floor(rawObserverCount)
+        : 0;
       const updatedAt = typeof data?.updated_at === 'number' ? data.updated_at : undefined;
       if (typeof updatedAt === 'number') {
         chat.syncServerTime(updatedAt);
@@ -850,7 +886,11 @@ watch(presencePopoverVisible, (visible, oldVisible) => {
 watch(
   () => chat.curChannel?.id,
   (channelId, prevChannelId) => {
-    if (!channelId || channelId === prevChannelId) {
+    if (channelId === prevChannelId) {
+      return;
+    }
+    observerCount.value = 0;
+    if (!channelId) {
       return;
     }
     chat.clearPresenceMap();
@@ -935,9 +975,13 @@ const sidebarToggleIcon = computed(() => sidebarCollapsed.value ? LayoutSidebarL
 </script>
 
 <template>
-  <div class="sc-header flex justify-between items-center w-full px-2" style="height: 3.5rem;">
-    <div>
-      <div class="flex items-center">
+  <div
+    class="sc-header flex justify-between items-center w-full px-2"
+    :class="{ 'sc-header--observer': isObserver }"
+    style="height: 3.5rem;"
+  >
+    <div class="sc-channel-heading">
+      <div class="sc-channel-heading__row flex items-center">
         <button
           type="button"
           class="sc-icon-button sc-sidebar-toggle-button mr-2"
@@ -948,7 +992,7 @@ const sidebarToggleIcon = computed(() => sidebarCollapsed.value ? LayoutSidebarL
           <n-icon :component="sidebarToggleIcon" size="20" />
         </button>
         <div class="sc-channel-title-group">
-          <span class="text-sm font-bold sm:text-xl">{{ channelTitle }}</span>
+          <span class="sc-channel-title text-sm font-bold sm:text-xl">{{ channelTitle }}</span>
           <span
             v-if="channelAggregateBadge.visible"
             class="sc-channel-aggregate-badge"
@@ -976,27 +1020,62 @@ const sidebarToggleIcon = computed(() => sidebarCollapsed.value ? LayoutSidebarL
     </div>
 
     <div v-if="!isObserver" class="sc-actions flex items-center">
-      <n-tooltip placement="bottom" trigger="hover">
-        <template #trigger>
-          <button type="button" class="sc-icon-button sc-connection-icon" :class="connectionStatus.classes"
-            :aria-label="connectionStatus.label" tabindex="-1">
-          <n-icon :component="connectionStatus.icon" size="16"
-            :class="{ 'sc-connection-icon--spin': connectionStatus.spinning }" />
-          </button>
-        </template>
-        <span>{{ connectionStatus.label }}</span>
-      </n-tooltip>
-
       <n-popover trigger="click" placement="bottom-end" :show="presencePopoverVisible"
         @update:show="presencePopoverVisible = $event">
         <template #trigger>
-          <button type="button" class="sc-icon-button sc-online-button" aria-label="查看在线成员">
-            <n-icon :component="Users" size="16" />
-            <span class="online-badge">{{ onlineMembersCount }}</span>
-          </button>
+          <n-tooltip placement="bottom" trigger="hover">
+            <template #trigger>
+              <button
+                type="button"
+                class="sc-icon-button sc-online-button"
+                :class="{ 'sc-online-button--busy': connectionStatus.spinning }"
+                :aria-label="presenceTooltipLabel"
+              >
+                <n-icon
+                  :component="Users"
+                  size="16"
+                  class="sc-online-button__members-icon"
+                />
+                <span
+                  :key="`online-${onlineBadgeAnimationKey}`"
+                  class="online-badge"
+                  :class="{ 'online-badge--changed': onlineBadgeAnimationKey > 0 }"
+                >
+                  {{ onlineMembersCount }}
+                </span>
+                <span
+                  :key="`status-${connectionRecoveryPulseKey}`"
+                  class="sc-online-button__status-dot"
+                  :class="{
+                    'is-connected': connectionStatus.state === 'connected',
+                    'is-connecting': connectionStatus.state === 'connecting',
+                    'is-reconnecting': connectionStatus.state === 'reconnecting',
+                    'is-disconnected': connectionStatus.state === 'disconnected',
+                    'is-busy': connectionStatus.spinning,
+                    'is-recovering': connectionStatus.state === 'connected' && connectionRecoveryPulseKey > 0,
+                  }"
+                  aria-hidden="true"
+                >
+                  <span
+                    v-if="connectionStatus.spinning"
+                    class="sc-online-button__status-ring"
+                    aria-hidden="true"
+                  ></span>
+                </span>
+              </button>
+            </template>
+            <span>{{ presenceTooltipLabel }}</span>
+          </n-tooltip>
         </template>
-        <UserPresencePopover :members="chat.curChannelUsers" :presence-map="chat.presenceMap"
-          @request-refresh="handlePresenceRefresh" />
+        <UserPresencePopover
+          :members="chat.curChannelUsers"
+          :presence-map="chat.presenceMap"
+          :observer-count="observerCount"
+          :connect-state="connectionStatus.state"
+          :connection-label="connectionStatus.label"
+          :latency-ms="connectionLatencyMs"
+          @request-refresh="handlePresenceRefresh"
+        />
       </n-popover>
 
       <n-tooltip placement="bottom" trigger="hover">
@@ -1046,10 +1125,15 @@ const sidebarToggleIcon = computed(() => sidebarCollapsed.value ? LayoutSidebarL
         <span>频道嵌入窗</span>
       </n-tooltip>
 
-      <button type="button" class="sc-icon-button action-toggle-button" :class="{ 'is-active': actionRibbonActive }"
-        @click="toggleActionRibbon" :aria-pressed="actionRibbonActive" aria-label="切换功能面板">
-        <n-icon :component="AppsOutline" size="18" />
-      </button>
+      <n-tooltip placement="bottom" trigger="hover">
+        <template #trigger>
+          <button type="button" class="sc-icon-button action-toggle-button" :class="{ 'is-active': actionRibbonActive }"
+            @click="toggleActionRibbon" :aria-pressed="actionRibbonActive" aria-label="更多跑团功能">
+            <n-icon :component="AppsOutline" size="18" />
+          </button>
+        </template>
+        <span>更多跑团功能</span>
+      </n-tooltip>
 
       <n-tooltip v-if="showNotifBell" placement="bottom" trigger="hover">
         <template #trigger>
@@ -1169,7 +1253,7 @@ const sidebarToggleIcon = computed(() => sidebarCollapsed.value ? LayoutSidebarL
         <template #icon>
           <n-icon :component="DocumentTextOutline" size="16" />
         </template>
-        查看战报
+        <span class="sc-ob-battle-report-label">查看战报</span>
       </n-button>
       <n-button size="small" type="primary" @click="goLogin">登录</n-button>
     </div>
@@ -1183,20 +1267,20 @@ const sidebarToggleIcon = computed(() => sidebarCollapsed.value ? LayoutSidebarL
     @apply="applyObserverFilters"
   />
 
-  <div v-if="userProfileShow" style="background-color: var(--n-color); margin-left: -1.5rem;"
+  <div v-if="userProfileShow" style="background-color: var(--n-color, var(--sc-bg-surface, #fff)); margin-left: -1.5rem;"
     class="absolute flex justify-center items-center w-full h-full sc-overlay-layer">
     <user-profile :openAISettingsOnMount="userProfileOpenAISettings" @close="() => { userProfileShow = false; userProfileOpenAISettings = false; }" />
   </div>
   <div
     v-if="adminShow"
-    style="background-color: var(--n-color); margin-left: -1.5rem;"
+    style="background-color: var(--n-color, var(--sc-bg-surface, #fff)); margin-left: -1.5rem;"
     class="absolute flex justify-center items-center w-full h-full sc-overlay-layer"
   >
     <AdminSettings :initial-tab="adminInitialTab" @close="adminShow = false" />
   </div>
   <div
     v-if="inputStatsShow"
-    style="background-color: var(--n-color); margin-left: -1.5rem; padding-top: 2rem;"
+    style="background-color: var(--n-color, var(--sc-bg-surface, #fff)); margin-left: -1.5rem; padding-top: 2rem;"
     class="absolute flex justify-center items-start w-full h-full sc-overlay-layer"
   >
     <component
@@ -1495,11 +1579,29 @@ const sidebarToggleIcon = computed(() => sidebarCollapsed.value ? LayoutSidebarL
   gap: 0.45rem;
 }
 
+.sc-channel-heading {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+
+.sc-channel-heading__row {
+  min-width: 0;
+}
+
 .sc-channel-title-group {
   min-width: 0;
+  max-width: 100%;
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
+}
+
+.sc-channel-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sc-channel-aggregate-badge {
@@ -1624,21 +1726,95 @@ const sidebarToggleIcon = computed(() => sidebarCollapsed.value ? LayoutSidebarL
   z-index: 1500; /* keep below Naive UI overlay base (>=2000) so nested popups/modal remain visible */
 }
 
-.sc-connection-icon {
-  cursor: default;
+.sc-online-button--busy .sc-online-button__members-icon {
+  opacity: 0.68;
 }
 
-.sc-connection-icon--spin {
-  animation: sc-connection-spin 0.9s linear infinite;
+.sc-online-button__members-icon {
+  transition: opacity 0.2s ease;
 }
 
-@keyframes sc-connection-spin {
+.sc-online-button__status-dot {
+  position: absolute;
+  right: 0.08rem;
+  bottom: 0.08rem;
+  width: 0.48rem;
+  height: 0.48rem;
+  display: block;
+  z-index: 2;
+  border: 1px solid var(--sc-bg-header, #fff);
+  border-radius: 9999px;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.16);
+  color: #22c55e;
+  background-color: currentColor;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.sc-online-button__status-dot.is-connecting {
+  color: #0ea5e9;
+}
+
+.sc-online-button__status-dot.is-reconnecting {
+  color: #f97316;
+}
+
+.sc-online-button__status-dot.is-disconnected {
+  color: #ef4444;
+}
+
+.sc-online-button__status-ring {
+  position: absolute;
+  inset: -0.22rem;
+  display: block;
+  pointer-events: none;
+  transform-origin: center;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 9999px;
+  opacity: 0.9;
+  animation: sc-online-status-spin 0.9s linear infinite;
+}
+
+.sc-online-button__status-dot.is-busy {
+  animation: sc-online-status-breathe 1.2s ease-in-out infinite;
+}
+
+.sc-online-button__status-dot.is-recovering {
+  animation: sc-online-status-pulse 0.5s ease-out;
+}
+
+@keyframes sc-online-status-spin {
   from {
     transform: rotate(0deg);
   }
 
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes sc-online-status-breathe {
+  0%,
+  100% {
+    opacity: 0.72;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes sc-online-status-pulse {
+  0% {
+    box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.16), 0 0 0 0 currentColor;
+  }
+
+  55% {
+    box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.16), 0 0 0 0.28rem transparent;
+  }
+
+  100% {
+    box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.16), 0 0 0 0 currentColor;
   }
 }
 
@@ -1688,28 +1864,87 @@ const sidebarToggleIcon = computed(() => sidebarCollapsed.value ? LayoutSidebarL
   line-height: 1;
 }
 
+.online-badge--changed {
+  animation: sc-online-badge-pop 0.2s ease-out;
+}
+
+@keyframes sc-online-badge-pop {
+  0% {
+    transform: scale(0.9);
+  }
+
+  65% {
+    transform: scale(1.06);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sc-online-button__status-dot.is-recovering,
+  .sc-online-button__status-dot.is-busy,
+  .online-badge--changed {
+    animation: none;
+  }
+}
+
 @media (max-width: 640px) {
   .sc-actions {
     gap: 0.32rem;
   }
 
-  .sc-actions--observer {
+  .sc-header--observer {
+    height: auto !important;
+    min-height: 3.5rem;
     flex-wrap: wrap;
-    row-gap: 0.4rem;
+    align-content: center;
+    row-gap: 0.35rem;
+    padding-block: 0.35rem;
+  }
+
+  .sc-header--observer .sc-channel-heading {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
+  .sc-actions--observer {
+    flex: 1 1 100%;
+    min-width: 0;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    overflow: visible;
+    row-gap: 0.32rem;
+  }
+
+  .sc-actions--observer > * {
+    flex: 0 0 auto;
   }
 
   .sc-ob-filters {
-    width: 100%;
+    width: auto;
+    flex: 0 0 auto;
     margin-right: 0;
     justify-content: flex-end;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     overflow: visible;
   }
 
   .sc-ob-role-select {
-    flex: 1 1 130px;
-    min-width: 130px;
-    max-width: none;
+    display: none;
+  }
+
+  .sc-ob-battle-report-button {
+    width: 1.95rem;
+    min-width: 1.95rem;
+    height: 1.95rem;
+    padding: 0;
+    border-radius: 9999px;
+  }
+
+  .sc-ob-battle-report-label {
+    display: none;
   }
 
   .sc-user-button {

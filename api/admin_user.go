@@ -49,8 +49,8 @@ func AdminUserList(c *fiber.Ctx) error {
 
 	// 搜索过滤
 	if keyword != "" {
-		query = query.Where("username LIKE ? OR nickname LIKE ?",
-			"%"+keyword+"%", "%"+keyword+"%")
+		query = query.Where("username LIKE ? OR nickname LIKE ? OR email LIKE ? OR id LIKE ?",
+			"%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%")
 	}
 
 	// 用户类型过滤
@@ -86,6 +86,61 @@ func AdminUserList(c *fiber.Ctx) error {
 		"pageSize": pageSize,
 		"total":    total,
 		"items":    items,
+	})
+}
+
+func AdminUserDetail(c *fiber.Ctx) error {
+	if !CanWithSystemRole(c, pm.PermFuncAdminUserEdit) {
+		return nil
+	}
+
+	userID := strings.TrimSpace(c.Query("id"))
+	if userID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "用户ID不能为空",
+		})
+	}
+
+	db := model.GetDB()
+	var user model.UserModel
+	if err := db.Where("id = ? AND deleted_at IS NULL", userID).Limit(1).Find(&user).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "获取用户详情失败",
+		})
+	}
+	if user.ID == "" {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "用户不存在",
+		})
+	}
+	user.RoleIds, _ = model.UserRoleMappingListByUserID(user.ID, "", "system")
+
+	var joinedWorldCount int64
+	if err := db.Table("world_members wm").
+		Joins("JOIN worlds w ON w.id = wm.world_id").
+		Where("wm.user_id = ? AND w.status = ?", user.ID, "active").
+		Select("COUNT(DISTINCT wm.world_id)").
+		Scan(&joinedWorldCount).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "获取用户世界统计失败",
+		})
+	}
+
+	var createdWorldCount int64
+	if err := db.Model(&model.WorldModel{}).
+		Where("owner_id = ?", user.ID).
+		Count(&createdWorldCount).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "获取用户世界统计失败",
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"user": user,
+		"stats": fiber.Map{
+			"joinedWorldCount":  joinedWorldCount,
+			"createdWorldCount": createdWorldCount,
+		},
 	})
 }
 

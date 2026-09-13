@@ -6,24 +6,29 @@ import RichTextContent from '@/components/rich-text/RichTextContent.vue'
 import TheaterPresentationMedia from '@/components/theater-presentation/TheaterPresentationMedia.vue'
 import { resolveAttachmentUrl } from '@/composables/useAttachmentResolver'
 import { createDefaultTheaterPresentation, resolveTheaterBackdropColor, resolveTheaterTextTransformStyle, resolveTheaterTransformStyle, type TheaterVisualLayer } from '@/types/theaterPresentation'
+import { resolvePlatformFontFamily } from '@/services/font/platformFontRegistry'
 import { isTipTapJson } from '@/utils/tiptap-render'
 import type { ChatCharactersSnapshotPayload } from '../bridge/theater-bridge-protocol'
 import {
   hasTheaterDialoguePerformanceContent,
   resolveTheaterDialoguePresentation,
-  type TheaterDialogueRuntime,
+  type TheaterDialogueRuntimeController,
   type TheaterDialogueRuntimeSnapshot,
 } from './theater-dialogue-runtime'
 import '@/components/theater-presentation/theaterComposition.css'
 import { useTheaterAppearanceCache } from '@/composables/useTheaterAppearanceCache'
 import { resolveTheaterReducedMotion } from '../shared/theater-reduced-motion'
 import { isTheaterBridgeDebugEnabled, logTheaterDialogueDebug } from '../bridge/theater-bridge-debug'
+import type { TheaterDialogueEmbedSettings } from './theater-dialogue-embed-settings'
 
 const props = defineProps<{
-  runtime: TheaterDialogueRuntime
+  runtime: TheaterDialogueRuntimeController
   characterSnapshot: ChatCharactersSnapshotPayload
   worldId: string
   channelId: string
+  fillContainer?: boolean
+  textOnly?: boolean
+  textOverrides?: TheaterDialogueEmbedSettings
 }>()
 
 const rootRef = ref<HTMLElement | null>(null)
@@ -40,6 +45,10 @@ let bodyContentObserver: { disconnect: () => void } | null = null
 let motionQuery: MediaQueryList | null = null
 let invalidateAppearance: ((event: Event) => void) | null = null
 let appearanceRequestGeneration = 0
+const speakerFontFamily = ref('')
+const contentFontFamily = ref('')
+let speakerFontLoadGeneration = 0
+let contentFontLoadGeneration = 0
 
 /** Keep the latest revealed line visible while dialogue text grows. */
 const stickDialogueBodyToBottom = () => {
@@ -66,9 +75,32 @@ const stickDialogueBodyToBottom = () => {
 
 const current = computed(() => snapshot.value.queue.current)
 const message = computed(() => current.value?.message || null)
-const presentation = computed(() => livePresentation.value || resolveTheaterDialoguePresentation(message.value, props.characterSnapshot))
+const presentation = computed(() => {
+  const base = livePresentation.value || resolveTheaterDialoguePresentation(message.value, props.characterSnapshot)
+  const overrides = props.textOverrides
+  if (!overrides) return base
+  return { ...base, dialogue: {
+    ...base.dialogue,
+    contentColor: overrides.contentColor || base.dialogue.contentColor,
+    charactersPerSecond: overrides.charactersPerSecond ?? base.dialogue.charactersPerSecond,
+    speaker: { ...base.dialogue.speaker, enabled: overrides.showSpeaker, fontAssetId: overrides.fontAssetId || base.dialogue.speaker.fontAssetId },
+    content: { ...base.dialogue.content, fontAssetId: overrides.fontAssetId || base.dialogue.content.fontAssetId },
+  } }
+})
+const effectiveDialogueTransform = computed(() => (
+  props.fillContainer
+    ? {
+        ...presentation.value.dialogue.transform,
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+        rotation: 0,
+      }
+    : presentation.value.dialogue.transform
+))
 const dialogueStyle = computed<CSSProperties>(() => ({
-  ...resolveTheaterTransformStyle(presentation.value.dialogue.transform),
+  ...resolveTheaterTransformStyle(effectiveDialogueTransform.value),
 }))
 const dialogueControlsStyle = computed<CSSProperties>(() => ({ ...dialogueStyle.value, zIndex: '1000' }))
 const portrait = computed(() => presentation.value.portrait?.enabled ? presentation.value.portrait : null)
@@ -101,19 +133,69 @@ const useRichPlayback = computed(() => {
 const showRichContent = computed(() => Boolean(richContent.value && (!typing.value || useRichPlayback.value)))
 const mediaActive = computed(() => Boolean(current.value && typing.value && visibleInViewport.value))
 const speakerColor = computed(() => {
+  if (props.textOverrides?.speakerColor) return props.textOverrides.speakerColor
   const color = String(message.value?.actor.color || '').trim()
   return typeof CSS !== 'undefined' && CSS.supports('color', color) ? color : 'var(--sc-text-primary, #f4f4f5)'
 })
 const textLayerStyle = (kind: 'speaker' | 'content'): CSSProperties => ({
-  ...resolveTheaterTextTransformStyle(presentation.value.dialogue[kind].transform),
+  ...(props.textOnly ? {} : resolveTheaterTextTransformStyle(presentation.value.dialogue[kind].transform)),
   display: presentation.value.dialogue[kind].enabled ? (kind === 'speaker' ? 'grid' : 'block') : 'none',
   textAlign: presentation.value.dialogue.textAlign,
   '--theater-font-scale': String(presentation.value.dialogue[kind].fontScale),
+  ...(props.textOnly && props.textOverrides ? { fontSize: `${props.textOverrides.fontSize}px`, '--theater-font-scale': '1' } : {}),
 })
+const speakerStyle = computed<CSSProperties>(() => ({
+  ...textLayerStyle('speaker'),
+  color: speakerColor.value,
+  ...(speakerFontFamily.value ? { fontFamily: speakerFontFamily.value } : {}),
+}))
 const contentStyle = computed<CSSProperties>(() => ({
   ...textLayerStyle('content'),
   color: presentation.value.dialogue.contentColor,
+  ...(contentFontFamily.value ? { fontFamily: contentFontFamily.value } : {}),
 }))
+
+const refreshSpeakerFontFamily = (fontAssetId: string | undefined) => {
+  const generation = ++speakerFontLoadGeneration
+  const normalizedId = String(fontAssetId || '').trim()
+  if (!normalizedId) {
+    speakerFontFamily.value = ''
+    return
+  }
+  speakerFontFamily.value = ''
+  void resolvePlatformFontFamily(normalizedId).then((family) => {
+    if (generation === speakerFontLoadGeneration) speakerFontFamily.value = family
+  }).catch(() => {
+    if (generation === speakerFontLoadGeneration) speakerFontFamily.value = ''
+  })
+}
+
+const refreshContentFontFamily = (fontAssetId: string | undefined) => {
+  const generation = ++contentFontLoadGeneration
+  const normalizedId = String(fontAssetId || '').trim()
+  if (!normalizedId) {
+    contentFontFamily.value = ''
+    return
+  }
+  contentFontFamily.value = ''
+  void resolvePlatformFontFamily(normalizedId).then((family) => {
+    if (generation === contentFontLoadGeneration) contentFontFamily.value = family
+  }).catch(() => {
+    if (generation === contentFontLoadGeneration) contentFontFamily.value = ''
+  })
+}
+
+watch(
+  () => presentation.value.dialogue.speaker.fontAssetId,
+  refreshSpeakerFontFamily,
+  { immediate: true },
+)
+
+watch(
+  () => presentation.value.dialogue.content.fontAssetId,
+  refreshContentFontFamily,
+  { immediate: true },
+)
 
 watch(
   () => presentation.value.dialogue.charactersPerSecond,
@@ -248,6 +330,8 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  speakerFontLoadGeneration += 1
+  contentFontLoadGeneration += 1
   appearanceRequestGeneration += 1
   unsubscribe?.()
   intersectionObserver?.disconnect()
@@ -262,12 +346,12 @@ onBeforeUnmount(() => {
   <div
     ref="rootRef"
     class="theater-dialogue-overlay theater-composition-host"
-    :class="{ 'is-open': current, 'is-reduced-motion': snapshot.reducedMotion }"
+    :class="{ 'is-open': current, 'is-reduced-motion': snapshot.reducedMotion, 'is-fill-container': fillContainer, 'is-text-only': textOnly }"
     aria-live="polite"
   >
-    <div v-if="current && narration.enabled" class="theater-dialogue-narration" :style="narrationStyle" />
+    <div v-if="!textOnly && current && narration.enabled" class="theater-dialogue-narration" :style="narrationStyle" />
     <div v-if="current" class="theater-composition">
-      <div v-if="portrait && !narration.enabled" class="theater-dialogue-portrait" :style="portraitStyle">
+      <div v-if="!textOnly && portrait && !narration.enabled" class="theater-dialogue-portrait" :style="portraitStyle">
         <TheaterPresentationMedia
           class="theater-dialogue-portrait__base"
           :media="portrait.media"
@@ -289,8 +373,8 @@ onBeforeUnmount(() => {
       </div>
 
       <section class="theater-dialogue-shell" :style="dialogueStyle">
-        <div v-if="!frame && !narration.enabled" class="theater-dialogue-shell__default" />
-        <div v-if="frame && !narration.enabled" class="theater-dialogue-frame" :style="frameStyle">
+        <div v-if="!textOnly && !frame && !narration.enabled" class="theater-dialogue-shell__default" />
+        <div v-if="!textOnly && frame && !narration.enabled" class="theater-dialogue-frame" :style="frameStyle">
           <TheaterPresentationMedia
             :media="frame.media"
             :playback-rate="frame.playbackRate"
@@ -298,7 +382,7 @@ onBeforeUnmount(() => {
           />
         </div>
         <div class="theater-dialogue-content" @click="completeCurrent">
-          <div v-if="!narration.enabled" class="theater-dialogue-speaker" :style="{ ...textLayerStyle('speaker'), color: speakerColor }">
+          <div v-if="textOnly || !narration.enabled" class="theater-dialogue-speaker" :style="speakerStyle">
             <span class="theater-dialogue-speaker__value">{{ message?.actor.displayName || '角色' }}</span>
           </div>
           <div ref="bodyRef" class="theater-dialogue-body" :style="contentStyle">
@@ -321,7 +405,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </section>
-      <div class="theater-dialogue-controls" :style="dialogueControlsStyle">
+      <div v-if="!textOnly" class="theater-dialogue-controls" :style="dialogueControlsStyle">
         <div class="theater-dialogue-actions">
           <n-tooltip trigger="hover">
             <template #trigger>
@@ -346,6 +430,16 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.is-text-only .theater-dialogue-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+.is-text-only .theater-dialogue-speaker { container-type: normal; flex: none; }
+.is-text-only .theater-dialogue-speaker__value { font-size: inherit; line-height: 1.3; }
+.is-text-only .theater-dialogue-body { flex: 1; }
+
 .theater-dialogue-overlay {
   position: absolute;
   z-index: 9500;
@@ -366,6 +460,12 @@ onBeforeUnmount(() => {
 
 .theater-dialogue-overlay > .theater-composition {
   z-index: 1;
+}
+
+.theater-dialogue-overlay.is-fill-container > .theater-composition {
+  width: 100cqw;
+  height: 100cqh;
+  aspect-ratio: auto;
 }
 
 .theater-dialogue-portrait,

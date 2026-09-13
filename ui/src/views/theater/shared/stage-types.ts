@@ -3,7 +3,7 @@ export const WORLD_UNIT_PX = 24
 export type StageObjectFit = 'fill' | 'cover' | 'contain'
 export type StageSurfaceFit = StageObjectFit | 'tile' | 'center'
 export type StageSurfaceTarget = 'background' | 'foreground'
-export type StageObjectType = 'group' | 'drawing' | 'text' | 'image' | 'button' | 'character' | 'video' | 'effect'
+export type StageObjectType = 'group' | 'drawing' | 'text' | 'image' | 'button' | 'character' | 'video' | 'effect' | 'iframe'
 export type StageDrawingTool = 'pen' | 'highlighter' | 'line' | 'arrow' | 'rectangle' | 'ellipse' | 'triangle' | 'polygon'
 export type StageDrawingDash = 'solid' | 'dashed' | 'dotted'
 
@@ -11,6 +11,38 @@ export interface StageAudioRef {
   assetId: string
   name: string
   volume: number
+}
+
+export interface StageIframeContent {
+  url: string
+  scale: number
+}
+
+export const STAGE_IFRAME_MIN_SCALE = 0.25
+export const STAGE_IFRAME_MAX_SCALE = 5
+
+export const normalizeStageIframeContent = (input: unknown): StageIframeContent => {
+  const value = input && typeof input === 'object' && !Array.isArray(input)
+    ? input as Partial<StageIframeContent>
+    : {}
+  const scale = typeof value.scale === 'number' && Number.isFinite(value.scale)
+    ? Math.min(STAGE_IFRAME_MAX_SCALE, Math.max(STAGE_IFRAME_MIN_SCALE, value.scale))
+    : 1
+  return {
+    url: typeof value.url === 'string' ? value.url.trim() : '',
+    scale,
+  }
+}
+
+export const resolveSafeStageIframeUrl = (value: string) => {
+  const normalized = value.trim()
+  if (!normalized) return ''
+  try {
+    const url = new URL(normalized)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? normalized : ''
+  } catch {
+    return ''
+  }
 }
 
 export type StageMusicTrackType = 'music' | 'ambience' | 'sfx'
@@ -195,6 +227,14 @@ type StageAtomicActionData =
   }
   | {
     id: string
+    type: 'clue.execute'
+    payload: {
+      version: 1
+      entries: StageClueActionEntry[]
+    }
+  }
+  | {
+    id: string
     type: 'object.toggle'
     payload: {
       objectId: string
@@ -203,6 +243,21 @@ type StageAtomicActionData =
 
 export type StageAtomicAction = StageAtomicActionData & {
   schedule: StageActionSchedule
+}
+
+export type StageClueAccessMode = 'keep' | 'inherit' | 'none' | 'view' | 'edit'
+
+export interface StageClueActionTarget {
+  userId: string
+  access: StageClueAccessMode
+}
+
+export interface StageClueActionEntry {
+  id: string
+  clueId: string
+  targets: StageClueActionTarget[]
+  present: boolean
+  confirm: boolean
 }
 
 export type StageAtomicActionDescriptor = StageAtomicActionData extends infer Action
@@ -408,6 +463,125 @@ export const normalizeStageSceneTransition = (input: unknown): StageSceneTransit
   }
 }
 
+export const stageSceneOverlayBlendModes = [
+  'normal',
+  'multiply',
+  'screen',
+  'overlay',
+  'darken',
+  'lighten',
+  'color-dodge',
+  'color-burn',
+  'hard-light',
+  'soft-light',
+] as const
+
+export type StageSceneOverlayBlendMode = typeof stageSceneOverlayBlendModes[number]
+
+export const stageSceneOverlayLayers = ['belowCharacters', 'aboveCharacters'] as const
+
+export type StageSceneOverlayLayer = typeof stageSceneOverlayLayers[number]
+export type StageSceneOverlayParamValue = string | number | boolean | null
+export type StageSceneOverlayParams = Record<string, StageSceneOverlayParamValue>
+
+export interface StageSceneOverlayMediaRef {
+  resourceId: string
+  variant?: string
+  mimeType?: string
+  animated?: boolean
+  loopCount?: number
+}
+
+export interface StageSceneOverlayBinding {
+  version: 1
+  id: string
+  effectId: string
+  name: string
+  enabled: boolean
+  opacity: number
+  blendMode: StageSceneOverlayBlendMode
+  layer: StageSceneOverlayLayer
+  media?: StageSceneOverlayMediaRef
+  params: StageSceneOverlayParams
+}
+
+const truncateSceneOverlayText = (value: string, maximum: number) => Array.from(value).slice(0, maximum).join('')
+
+const normalizeStageSceneOverlayParams = (input: unknown): StageSceneOverlayParams => {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {}
+  const prototype = Object.getPrototypeOf(input)
+  if (prototype !== Object.prototype && prototype !== null) return {}
+  const params: StageSceneOverlayParams = {}
+  Object.entries(input as Record<string, unknown>).slice(0, 64).forEach(([rawKey, value]) => {
+    const key = truncateSceneOverlayText(rawKey.trim(), 64)
+    if (!key) return
+    if (typeof value === 'string') params[key] = truncateSceneOverlayText(value, 512)
+    else if (typeof value === 'number' && Number.isFinite(value)) params[key] = value
+    else if (typeof value === 'boolean' || value === null) params[key] = value
+  })
+  return params
+}
+
+const normalizeStageSceneOverlayMedia = (input: unknown): StageSceneOverlayMediaRef | undefined => {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const prototype = Object.getPrototypeOf(input)
+  if (prototype !== Object.prototype && prototype !== null) return undefined
+  const value = input as Partial<StageSceneOverlayMediaRef>
+  const resourceId = typeof value.resourceId === 'string' ? value.resourceId.trim() : ''
+  if (!resourceId || Array.from(resourceId).length > 128) return undefined
+  const variant = typeof value.variant === 'string'
+    ? truncateSceneOverlayText(value.variant.trim(), 64) || 'original'
+    : 'original'
+  const mimeType = typeof value.mimeType === 'string'
+    ? truncateSceneOverlayText(value.mimeType.trim(), 128)
+    : ''
+  const loopCount = typeof value.loopCount === 'number'
+    && Number.isFinite(value.loopCount)
+    && Number.isInteger(value.loopCount)
+    && value.loopCount > 0
+    ? Math.min(65_535, value.loopCount)
+    : undefined
+  return {
+    resourceId,
+    variant,
+    ...(mimeType ? { mimeType } : {}),
+    ...(typeof value.animated === 'boolean' ? { animated: value.animated } : {}),
+    ...(loopCount ? { loopCount } : {}),
+  }
+}
+
+export const normalizeStageSceneOverlays = (input: unknown): StageSceneOverlayBinding[] => {
+  if (!Array.isArray(input)) return []
+  return input.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return []
+    const value = candidate as Partial<StageSceneOverlayBinding>
+    const id = typeof value.id === 'string' ? truncateSceneOverlayText(value.id.trim(), 128) : ''
+    const effectId = typeof value.effectId === 'string' ? truncateSceneOverlayText(value.effectId.trim(), 128) : ''
+    if (!id || !effectId) return []
+    const name = typeof value.name === 'string'
+      ? truncateSceneOverlayText(value.name, 128)
+      : effectId
+    return [{
+      version: 1 as const,
+      id,
+      effectId,
+      name,
+      enabled: value.enabled !== false,
+      opacity: typeof value.opacity === 'number' && Number.isFinite(value.opacity)
+        ? Math.min(1, Math.max(0, value.opacity))
+        : 1,
+      blendMode: stageSceneOverlayBlendModes.includes(value.blendMode as StageSceneOverlayBlendMode)
+        ? value.blendMode as StageSceneOverlayBlendMode
+        : 'normal',
+      layer: stageSceneOverlayLayers.includes(value.layer as StageSceneOverlayLayer)
+        ? value.layer as StageSceneOverlayLayer
+        : 'aboveCharacters',
+      media: normalizeStageSceneOverlayMedia(value.media),
+      params: normalizeStageSceneOverlayParams(value.params),
+    }]
+  }).slice(0, 32)
+}
+
 export const stageEntrancePresets = ['none', 'fade', 'slide', 'zoom', 'mask'] as const
 export type StageEntrancePreset = typeof stageEntrancePresets[number]
 
@@ -556,6 +730,7 @@ export interface StageLiveState {
   transition: StageSceneTransition
   switchAudio: StageAudioRef | null
   musicSnapshot: StageMusicSnapshot | null
+  sceneOverlays: StageSceneOverlayBinding[]
   serverState?: Record<string, unknown>
 }
 
@@ -567,6 +742,7 @@ export interface StageScene {
   switchText: string
   order: number
   locked: boolean
+  published: boolean
   folderId?: string
   state: StageSceneState
 }

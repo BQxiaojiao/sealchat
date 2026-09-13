@@ -8,6 +8,7 @@ import { useChannelSearchStore } from '@/stores/channelSearch';
 import { usePushNotificationStore } from '@/stores/pushNotification';
 import { useIFormStore } from '@/stores/iform';
 import { useAudioStudioStore } from '@/stores/audioStudio';
+import { useWorldClueStore } from '@/stores/worldClue';
 import AudioDrawer from '@/components/audio/AudioDrawer.vue';
 import ChatHeader from '@/views/components/header.vue';
 import ChatSidebar from '@/views/components/sidebar.vue';
@@ -24,6 +25,8 @@ import {
   type ChatCharactersSnapshotPayload,
   type ChatComposerInsertPayload,
   type ChatComposerInsertResult,
+  type ChatClueAccessReadResult,
+  type ChatClueOptionsReadResult,
   type ChatMessageSendPayload,
   type ChatMessageSendResult,
   type InitializePayload,
@@ -92,6 +95,7 @@ const pushStore = usePushNotificationStore();
 const iFormStore = useIFormStore();
 iFormStore.bootstrap();
 const audioStudio = useAudioStudioStore();
+const worldClue = useWorldClueStore();
 
 const paneId = computed(() => (typeof route.query.paneId === 'string' ? route.query.paneId : '') as PaneId | '');
 const initialWorldId = computed(() => (typeof route.query.worldId === 'string' ? route.query.worldId : ''));
@@ -103,6 +107,17 @@ const initialAudioOwner = computed(() => {
   return route.query.audioOwner === '1' || route.query.audioOwner === 'true';
 });
 const theaterMode = computed(() => route.query.mode === 'theater');
+const embeddedToolbar = computed(() => route.query.toolbar === '1');
+const floatingChatMode = computed(() => route.query.floatingChat === '1');
+const inlineSplitMode = computed(() => route.query.inlineSplit === '1');
+const inlineSplitForceOoc = computed(
+  () => inlineSplitMode.value && route.query.forceOoc === '1',
+);
+const compactFloatingChat = computed(
+  () => inlineSplitMode.value || floatingChatMode.value,
+);
+const floatingChatActive = ref(false);
+const showChatHeader = computed(() => theaterMode.value || (embeddedToolbar.value && !floatingChatMode.value));
 const theaterSessionId = computed(() => (typeof route.query.sessionId === 'string' ? route.query.sessionId.trim() : ''));
 const chatViewRef = ref<any>(null);
 
@@ -392,6 +407,57 @@ const startTheaterBridge = async () => {
     await audioStudio.applyStageMusicSnapshot(payload.snapshot);
     return { ok: true };
   });
+  client.onCommand<Record<string, never>, ChatClueOptionsReadResult>('chat.clue.options.read', async (_payload, bridgeMessage) => {
+    if (bridgeMessage.source !== 'stage' || bridgeMessage.target !== 'chat') {
+      return { ok: false, error: { code: 'INVALID_SOURCE', message: 'chat.clue.options.read 仅接受舞台端命令' } };
+    }
+    if (!theaterBridgeInitialized || theaterBridgeClient !== client) {
+      return { ok: false, error: { code: 'BRIDGE_NOT_READY', message: '聊天桥接尚未初始化' } };
+    }
+    if (!theaterGrantedPermissions.has('chat.clue.options.read') || !isOwnerOrAdmin.value) {
+      return { ok: false, error: { code: 'PERMISSION_DENIED', message: '缺少线索管理读取权限' } };
+    }
+    if (String(chat.curChannel?.id || '').trim() !== channelId || String(chat.currentWorldId || '').trim() !== worldId) {
+      return { ok: false, error: { code: 'CONTEXT_CHANGED', message: '聊天已离开小剧场绑定频道' } };
+    }
+    await Promise.all([worldClue.loadWorld(worldId), worldClue.loadRoster(worldId)]);
+    return {
+      ok: true,
+      clues: worldClue.summaries
+        .filter((clue) => clue.status !== 'archived')
+        .map((clue) => ({
+          id: clue.id,
+          title: clue.title,
+          kind: clue.kind,
+          status: clue.status,
+          publishSeq: clue.publishSeq,
+          ...(clue.sharedFolderId ? { sharedFolderId: clue.sharedFolderId } : {}),
+        })),
+      roster: worldClue.roster.map((member) => ({
+        userId: member.userId,
+        username: member.username,
+        nickname: member.nickname,
+        avatar: member.avatar,
+        role: member.role,
+      })),
+    };
+  });
+  client.onCommand<{ clueId: string }, ChatClueAccessReadResult>('chat.clue.access.read', async (payload, bridgeMessage) => {
+    if (bridgeMessage.source !== 'stage' || bridgeMessage.target !== 'chat') {
+      return { ok: false, error: { code: 'INVALID_SOURCE', message: 'chat.clue.access.read 仅接受舞台端命令' } };
+    }
+    if (!theaterBridgeInitialized || theaterBridgeClient !== client) {
+      return { ok: false, error: { code: 'BRIDGE_NOT_READY', message: '聊天桥接尚未初始化' } };
+    }
+    if (!theaterGrantedPermissions.has('chat.clue.access.read') || !isOwnerOrAdmin.value) {
+      return { ok: false, error: { code: 'PERMISSION_DENIED', message: '缺少线索管理读取权限' } };
+    }
+    if (String(chat.curChannel?.id || '').trim() !== channelId || String(chat.currentWorldId || '').trim() !== worldId) {
+      return { ok: false, error: { code: 'CONTEXT_CHANGED', message: '聊天已离开小剧场绑定频道' } };
+    }
+    const items = await worldClue.loadAccess(worldId, payload.clueId);
+    return { ok: true, items };
+  });
   client.onCommand<ChatMessageSendPayload, ChatMessageSendResult>('chat.message.send', async (payload, bridgeMessage) => {
     if (bridgeMessage.source !== 'stage' || bridgeMessage.target !== 'chat') {
       return { ok: false, error: { code: 'INVALID_SOURCE', message: 'chat.message.send 仅接受舞台端命令' } };
@@ -653,6 +719,7 @@ const postState = (type: 'sealchat.embed.ready' | 'sealchat.embed.state') => {
     channelTree: normalizeChannelTree(buildChannelTree()),
     searchPanelVisible: !!channelSearch.panelVisible,
     stickyNoteVisible: !!chatViewRef.value?.getStickyNoteVisible?.(),
+    clueBoxVisible: !!chatViewRef.value?.getClueBoxVisible?.(),
     characterCardVisible: !!chatViewRef.value?.getCharacterCardVisible?.(),
     characterCardEnabled: !!channelId && chat.curChannel?.characterApiEnabled !== false,
     characterCardReason: typeof chat.curChannel?.characterApiReason === 'string' ? chat.curChannel.characterApiReason : '',
@@ -668,7 +735,7 @@ const postStateThrottled = throttle((type: 'sealchat.embed.ready' | 'sealchat.em
 });
 
 const syncAudioStudioContext = () => {
-  if (!audioOwner.value) return;
+  if (!audioOwner.value && !embeddedToolbar.value) return;
   const channelId = chat.curChannel?.id ? String(chat.curChannel.id) : '';
   audioStudio.setCurrentWorld(chat.currentWorldId || null);
   audioStudio.setActiveChannel(channelId || null);
@@ -712,7 +779,24 @@ const postFocus = () => {
   postToParent({ type: 'sealchat.embed.focus', paneId: paneId.value });
 };
 
-const handleInteraction = () => postFocus();
+const handleInteraction = () => {
+  if (compactFloatingChat.value) {
+    floatingChatActive.value = true;
+  }
+  postFocus();
+};
+
+const handleFloatingFocus = () => {
+  if (compactFloatingChat.value) {
+    floatingChatActive.value = true;
+  }
+};
+
+const handleFloatingBlur = () => {
+  if (compactFloatingChat.value) {
+    floatingChatActive.value = false;
+  }
+};
 
 const handleDrawerShow = () => {
   if (!paneId.value) return;
@@ -751,6 +835,22 @@ const handleMessage = async (event: MessageEvent) => {
     return;
   }
 
+  if (data.type === 'sealchat.embed.setIcMode') {
+    const mode = data.icMode === 'ooc' ? 'ooc' : data.icMode === 'ic' ? 'ic' : null;
+    const channelId = chat.curChannel?.id ? String(chat.curChannel.id) : '';
+    if (mode && channelId) {
+      chat.setIcMode(mode, channelId, undefined, { persist: false });
+      if (chat.editing) chat.updateEditingIcMode(mode);
+      postStateThrottled('sealchat.embed.state');
+    }
+    return;
+  }
+
+  if (data.type === 'sealchat.embed.toggleActionRibbon') {
+    chatEvent.emit('action-ribbon-toggle');
+    return;
+  }
+
   if (data.type === 'sealchat.embed.openPanel') {
     const panel = typeof data.panel === 'string' ? data.panel : '';
     if (panel && chatViewRef.value?.openPanelForShell) {
@@ -771,6 +871,14 @@ const handleMessage = async (event: MessageEvent) => {
   if (data.type === 'sealchat.embed.setStickyNoteVisible') {
     if (typeof data.visible === 'boolean' && chatViewRef.value?.setStickyNoteVisible) {
       chatViewRef.value.setStickyNoteVisible(data.visible);
+    }
+    postStateThrottled('sealchat.embed.state');
+    return;
+  }
+
+  if (data.type === 'sealchat.embed.setClueBoxVisible') {
+    if (typeof data.visible === 'boolean' && chatViewRef.value?.setClueBoxVisible) {
+      chatViewRef.value.setClueBoxVisible(data.visible);
     }
     postStateThrottled('sealchat.embed.state');
     return;
@@ -855,6 +963,9 @@ const handleMessage = async (event: MessageEvent) => {
       if (chatViewRef.value?.setStickyNoteVisible) {
         chatViewRef.value.setStickyNoteVisible(!!snapshot.stickyNoteVisible);
       }
+      if (chatViewRef.value?.setClueBoxVisible) {
+        chatViewRef.value.setClueBoxVisible(!!snapshot.clueBoxVisible);
+      }
       if (chatViewRef.value?.setCharacterCardVisible) {
         chatViewRef.value.setCharacterCardVisible(!!snapshot.characterCardVisible);
       }
@@ -889,6 +1000,9 @@ const initialize = async () => {
   initializing.value = true;
   try {
     pushStore.setEmbedNotifyOwner(initialNotifyOwner.value);
+    if (inlineSplitForceOoc.value) {
+      chat.setChannelSessionRestoreFilterOverride('ooc');
+    }
     await chat.ensureWorldReady();
     if (initialWorldId.value) {
       chat.setCurrentWorld(initialWorldId.value);
@@ -899,8 +1013,18 @@ const initialize = async () => {
     if (initialChannelId.value) {
       await chat.channelSwitchTo(initialChannelId.value);
     }
+    if (inlineSplitForceOoc.value && chat.curChannel?.id) {
+      const channelId = String(chat.curChannel.id);
+      try {
+        await chat.loadChannelIdentities(channelId, false);
+      } catch (error) {
+        console.warn('[embed] inline split identity initialization failed', error);
+      }
+      chat.setIcMode('ooc', channelId, undefined, { persist: false });
+      chat.setFilterState({ ...chat.filterState, icFilter: 'ooc' });
+    }
     await fetchRoleOptions(chat.curChannel?.id ? String(chat.curChannel.id) : '');
-    postStateThrottled('sealchat.embed.ready');
+    postState('sealchat.embed.ready');
   } finally {
     initializing.value = false;
   }
@@ -1051,7 +1175,7 @@ watch(
 watch(
   () => chat.curChannel?.id,
   (channelId) => {
-    if (!audioOwner.value) return;
+    if (!audioOwner.value && !embeddedToolbar.value) return;
     audioStudio.setActiveChannel(channelId ? String(channelId) : null);
   },
   { immediate: true },
@@ -1060,7 +1184,7 @@ watch(
 watch(
   () => chat.currentWorldId,
   (worldId) => {
-    if (!audioOwner.value) return;
+    if (!audioOwner.value && !embeddedToolbar.value) return;
     audioStudio.setCurrentWorld(worldId || null);
   },
   { immediate: true },
@@ -1098,6 +1222,8 @@ onMounted(async () => {
   window.addEventListener('message', handleMessage);
   document.addEventListener('pointerdown', handleInteraction, { capture: true });
   document.addEventListener('keydown', handleInteraction, { capture: true });
+  window.addEventListener('focus', handleFloatingFocus);
+  window.addEventListener('blur', handleFloatingBlur);
   await initialize();
   try {
     await startTheaterBridge();
@@ -1117,17 +1243,24 @@ onBeforeUnmount(() => {
   }
   document.removeEventListener('pointerdown', handleInteraction, { capture: true } as any);
   document.removeEventListener('keydown', handleInteraction, { capture: true } as any);
+  window.removeEventListener('focus', handleFloatingFocus);
+  window.removeEventListener('blur', handleFloatingBlur);
 });
 </script>
 
 <template>
   <div class="sc-embed-root">
     <ChatHeader
-      v-if="theaterMode"
+      v-if="showChatHeader"
       :sidebar-collapsed="true"
       @toggle-sidebar="handleTheaterHeaderSidebarToggle"
     />
-    <Chat ref="chatViewRef" class="sc-embed-chat" @drawer-show="handleDrawerShow" />
+    <Chat
+      ref="chatViewRef"
+      class="sc-embed-chat"
+      :hide-composer="compactFloatingChat && !floatingChatActive"
+      @drawer-show="handleDrawerShow"
+    />
     <AudioDrawer />
     <n-drawer v-model:show="theaterSidebarVisible" placement="left" :width="'min(360px, 88vw)'">
       <n-drawer-content closable body-content-style="padding: 0">

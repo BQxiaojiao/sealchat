@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import Konva from 'konva'
 import { Howl, Howler } from 'howler'
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { NBadge, NButton, NButtonGroup, NCheckbox, NColorPicker, NDropdown, NIcon, NInput, NInputNumber, NModal, NPopover, NProgress, NRadio, NRadioGroup, NSelect, NSlider, NSwitch, NTooltip, useDialog, useMessage, type DropdownOption } from 'naive-ui'
+import { computed, defineAsyncComponent, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { NBadge, NButton, NButtonGroup, NCheckbox, NColorPicker, NDropdown, NIcon, NInput, NInputNumber, NModal, NPopover, NProgress, NRadio, NRadioGroup, NSelect, NSlider, NSwitch, NTabPane, NTabs, NTooltip, useDialog, useMessage, type DropdownOption } from 'naive-ui'
 import {
   ArrowBackUp,
   ArrowDown,
@@ -12,11 +12,13 @@ import {
   Archive,
   Bolt,
   BoltOff,
+  Check,
   Clipboard,
   ChevronDown,
   ChevronRight,
   Components,
   CloudDownload,
+  CloudRain,
   Copy,
   Cut,
   Dots,
@@ -45,9 +47,17 @@ import {
   Stack2,
   Trash,
   Upload,
+  World,
+  AppWindow,
   X,
 } from '@vicons/tabler'
 import { api, urlBase } from '@/stores/_config'
+import { useIFormStore } from '@/stores/iform'
+import { useStickyNoteStore } from '@/stores/stickyNote'
+import { useCharacterCardStore } from '@/stores/characterCard'
+import { useChannelCharacterSnapshotStore } from '@/stores/channelCharacterSnapshot'
+import { useUtilsStore } from '@/stores/utils'
+import { generateInternalSurfaceLink, resolveInternalSurfaceLinkBase } from '@/utils/internalSurfaceLink'
 import { getUploadTimeoutMs } from '@/utils/uploadTimeout'
 import { useAudioStudioStore } from '@/stores/audioStudio'
 import { compressImage } from '@/composables/useImageCompressor'
@@ -57,13 +67,17 @@ import {
   STAGE_ACTION_DELAY_STEP_MS,
   STAGE_ACTION_MAX_DELAY_MS,
   STAGE_ENTRANCE_MAX_DURATION_MS,
+  STAGE_IFRAME_MAX_SCALE,
+  STAGE_IFRAME_MIN_SCALE,
   createDefaultStageActionSchedule,
   createDefaultStageImageAnnotation,
   normalizeStageImageAnnotation,
+  normalizeStageIframeContent,
   normalizeStageAudioRef,
   normalizeStageMusicSnapshot,
   normalizeStageEntranceConfig,
   normalizeStageSceneTransition,
+  resolveSafeStageIframeUrl,
   stageSceneTransitionTypes,
   type StageEntranceConfig,
   type StageEntrancePlayback,
@@ -92,7 +106,7 @@ import {
   type StageSurfaceStyle,
   type StageSurfaceTarget,
 } from '../shared/stage-types'
-import { stageActionSchema, type ChatCharactersSnapshotPayload } from '../bridge/theater-bridge-protocol'
+import { stageActionSchema, type ChatCharactersSnapshotPayload, type ChatClueAccessReadResult, type ChatClueOptionsReadResult } from '../bridge/theater-bridge-protocol'
 import { syncStageObjectHierarchy } from './stage-layering'
 import { compareStageLayersBottomToTop, compareStageLayersTopToBottom } from './stage-layer-order'
 import { buildStageLayerRows, stageLayerSelectionExpansionIds } from './stage-layer-tree'
@@ -115,17 +129,25 @@ import StageTextOverlay from './StageTextOverlay.vue'
 import StageImageAnnotationEditor from './StageImageAnnotationEditor.vue'
 import TheaterActionSequenceEditor from './TheaterActionSequenceEditor.vue'
 import TheaterRandomTableEditor from './TheaterRandomTableEditor.vue'
+import TheaterClueActionEditor from './TheaterClueActionEditor.vue'
 import type { TheaterStageStore } from './StageStore'
 import { createStageSequenceAction, isStageSequenceAction } from '../shared/stage-actions'
 import { resolveTheaterReducedMotion } from '../shared/theater-reduced-motion'
 import TheaterDialogueOverlay from '../dialogue/TheaterDialogueOverlay.vue'
+import {
+  buildTheaterDialogueSurfaceUrl,
+  parseTheaterDialogueSurfaceUrl,
+} from '../dialogue/theater-dialogue-surface'
 import TheaterCharacterStatsOverlay from './TheaterCharacterStatsOverlay.vue'
+import type { TheaterFloatingResource } from '@/utils/theaterFloatingBridge'
+import type { TheaterFloatingWindowAction, TheaterFloatingWindowSummary } from '../host/theater-floating-window'
 import type { TheaterDialogueRuntime } from '../dialogue/theater-dialogue-runtime'
 import type { TheaterChatBridgeStatus } from '../bridge/TheaterHostBridge'
 import type { TheaterEditorCommand, TheaterSection, TheaterSelection } from '@/components/theater-presentation/theaterPresentationEditorState'
 import type { TheaterPresentation } from '@/types/theaterPresentation'
 import TheaterPresentationPreview from '@/components/theater-presentation/TheaterPresentationPreview.vue'
 import TheaterEffectOverlay from '../effects/TheaterEffectOverlay.vue'
+import SceneOverlayStageHost from '../overlays/SceneOverlayStageHost.vue'
 import { TheaterEffectRuntime, type TheaterEffectPlayback } from '../effects/theater-effect-runtime'
 import { isTheaterEffectObject, setTheaterEffectConfig, theaterEffectConfigFromObject } from '../effects/theater-effect-types'
 import {
@@ -140,10 +162,18 @@ import {
   type TheaterImageFolderPreset,
   type TheaterImageObjectPreset,
 } from '../effects/theater-image-folder-preset'
-import { THEATER_IMAGE_ASSET_DRAG_TYPE, type TheaterImageAsset } from '../effects/theater-image-assets'
+import {
+  THEATER_IMAGE_ASSET_DRAG_TYPE,
+  THEATER_IMAGE_ASSET_SCOPE_DRAG_TYPE,
+  type TheaterImageAsset,
+} from '../effects/theater-image-assets'
+
+const sceneOverlayImageFolderName = '场景叠加'
 
 const props = defineProps<{
   store: TheaterStageStore
+  floatingWindows?: TheaterFloatingWindowSummary[]
+  floatingChannelOptions?: { value: string; label: string }[]
   worldId: string
   channelId: string
   scopeType?: 'channel' | 'world'
@@ -167,13 +197,16 @@ const props = defineProps<{
   sceneDialogueEnabled: boolean
   sceneAudioEnabled: boolean
   syncBeforeOrganizerWrite: () => Promise<void>
+  readClueOptions?: () => Promise<ChatClueOptionsReadResult>
+  readClueAccess?: (clueId: string) => Promise<ChatClueAccessReadResult>
 }>()
 const emit = defineEmits<{
+  floatingWindowAction: [action: TheaterFloatingWindowAction]
   actionTriggered: [payload: StageActionTriggeredPayload]
   pointerTrace: [trace: StagePointerTraceInput]
   selectCharacter: [identityId: string]
   selectCharacterVariant: [payload: { identityId: string, variantId: string | null }]
-  openCharacterCard: [identityId: string]
+  openCharacterCard: [payload: { resource: TheaterFloatingResource; clientX: number; clientY: number }]
   toggleChat: []
   disconnectChatBridge: []
   reconnectChatBridge: []
@@ -207,6 +240,7 @@ const stageActionDescriptions: Record<StageAction['type'], string> = {
   'chat.insert': '插入输入框',
   'scene.apply': '切换场景',
   'effect.play': '触发特效',
+  'clue.execute': '线索',
   'object.toggle': '显隐切换',
   'action.sequence': '组合动作',
 }
@@ -241,12 +275,18 @@ let imageAnnotationTimer: number | null = null
 let imageAnnotationPendingObjectId = ''
 const layerPanelOpen = ref(false)
 const effectPanelOpen = ref(false)
+const overlayPanelOpen = ref(false)
+const floatingPanelOpen = ref(false)
 const assetPanelOpen = ref(false)
 const effectEditingTarget = ref<'frame' | 'media'>('frame')
 const toolbarColorsVisible = ref(false)
+const componentActionsExpanded = ref(false)
+const iframeInteractionDisabled = ref(false)
 const MessageImageEditor = defineAsyncComponent(() => import('@/components/chat/MessageImageEditor.vue'))
 const TheaterEffectPanel = defineAsyncComponent(() => import('../effects/TheaterEffectPanel.vue'))
+const SceneOverlayManagerPanel = defineAsyncComponent(() => import('../overlays/SceneOverlayManagerPanel.vue'))
 const TheaterAssetManager = defineAsyncComponent(() => import('../effects/TheaterAssetManager.vue'))
+const TheaterFloatingManagerPanel = defineAsyncComponent(() => import('./TheaterFloatingManagerPanel.vue'))
 const effectPlaybacks = ref<TheaterEffectPlayback[]>([])
 const audioStudio = useAudioStudioStore()
 const theaterAudioAssets = ref<AudioAsset[]>([])
@@ -287,6 +327,7 @@ const stageMessage = useMessage()
 const packageDialog = useDialog()
 const stageDialog = useDialog()
 const packageBusy = ref(false)
+const sceneOverlayPresetRefreshToken = ref(0)
 const packageProgressVisible = ref(false)
 const packageProgressJob = ref<TheaterPackageJob | null>(null)
 const packageProgressError = ref('')
@@ -310,7 +351,7 @@ type TheaterPackageJob = {
   progressStage?: string
   outputFileName?: string
   errorMessage?: string
-  summary?: { packageKind?: 'theater' | 'effects', effects?: number, scenes?: number, objects?: number, resources?: number, audioAssets?: number, animatedResources?: number, warnings?: string[] }
+  summary?: { packageKind?: 'theater' | 'effects', effects?: number, scenes?: number, objects?: number, resources?: number, audioAssets?: number, animatedResources?: number, sceneOverlayPresets?: number, warnings?: string[] }
 }
 
 const canManagePackages = computed(() => props.syncReady && props.permissions.includes('stage.admin.restore'))
@@ -480,6 +521,7 @@ const importTheaterPackageFile = async (file: File) => {
     const job = await pollTheaterPackageJob(response.data.job.id)
     await fetchTheaterAudioAssets()
     await fetchTheaterPanelOrganizer()
+    sceneOverlayPresetRefreshToken.value += 1
     const warnings = job.summary?.warnings?.filter(Boolean) || []
     packageMessage.success(job.summary?.packageKind === 'effects'
       ? `已导入 ${job.summary?.effects ?? job.summary?.objects ?? 0} 个特效`
@@ -948,6 +990,14 @@ const theaterPopoverThemeOverrides = {
   boxShadow: '0 14px 34px rgba(0, 0, 0, .2)',
 }
 const theaterSecondaryMenuProps = () => ({ class: 'theater-secondary-surface' })
+const iframeInteractionOptions = computed<DropdownOption[]>(() => [{
+  key: 'disable-interaction',
+  label: '禁用交互',
+  icon: () => h(NIcon, { style: { opacity: iframeInteractionDisabled.value ? 1 : 0 } }, { default: () => h(Check) }),
+}])
+const toggleIframeInteraction = (key: string | number) => {
+  if (key === 'disable-interaction') iframeInteractionDisabled.value = !iframeInteractionDisabled.value
+}
 
 const revealToolbarColors = () => { toolbarColorsVisible.value = true }
 const hideToolbarColors = () => { toolbarColorsVisible.value = false }
@@ -1051,6 +1101,7 @@ let layerHierarchyMovePending = false
 let layerHierarchyUpdatedObjectIds = new Set<string>()
 const workspaceRef = ref<HTMLDivElement | null>(null)
 const hasPermission = (permission: string) => props.syncReady && props.permissions.includes(permission)
+const canBrowseScenes = computed(() => hasPermission('stage.view'))
 const canEditAllObjects = computed(() => hasPermission('stage.object.edit'))
 const canEditDelegatedObjects = computed(() => hasPermission('stage.object.edit.delegated'))
 const canSwitchScene = computed(() => hasPermission('stage.scene.switch'))
@@ -1058,6 +1109,21 @@ const canTriggerActions = computed(() => hasPermission('stage.action.trigger'))
 const canUploadResources = computed(() => hasPermission('stage.resource.upload'))
 const canDeleteResources = computed(() => hasPermission('stage.resource.delete'))
 const canManageResources = computed(() => canUploadResources.value || canDeleteResources.value)
+const sceneOverlayImageFolder = computed(() => theaterPanelOrganizer.value.folders.find(
+  (folder) => folder.domain === 'image' && folder.name.trim() === sceneOverlayImageFolderName,
+))
+const sceneOverlayImageAssets = computed(() => {
+  const folderId = sceneOverlayImageFolder.value?.id
+  if (!folderId) return []
+  const itemOrder = new Map(theaterPanelOrganizer.value.items
+    .filter((item) => item.domain === 'image' && item.folderId === folderId)
+    .map((item) => [item.targetId, item.sortOrder]))
+  return theaterImageAssets.value
+    .filter((asset) => itemOrder.has(asset.id))
+    .sort((left, right) => (itemOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER)
+      - (itemOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER)
+      || left.name.localeCompare(right.name))
+})
 const referencedTheaterAudioAssetIds = computed(() => [...new Set([
   ...Object.values(props.store.state.scenes).flatMap((scene) => [
     scene.state.switchAudio?.assetId,
@@ -1095,6 +1161,7 @@ const canInteractObject = (object: StageObject | null | undefined) => Boolean(
   && canTriggerActions.value
   && object.visible
   && object.interactive
+  && !(iframeInteractionDisabled.value && object.type === 'iframe')
   && hasConfiguredObjectAction(object)
   && isStageActionTarget(object.type),
 )
@@ -1228,10 +1295,11 @@ const saveImageAnnotation = (annotation: StageImageAnnotation) => {
   closeImageAnnotationEditor()
 }
 
-type PanelId = 'scene' | 'inspector' | 'layer' | 'effect' | 'asset'
+type PanelId = 'scene' | 'inspector' | 'layer' | 'effect' | 'overlay' | 'asset' | 'floating'
 
 const canOpenPanel = (id: PanelId) => {
-  if (id === 'scene') return canEditAllObjects.value || canSwitchScene.value
+  if (id === 'floating') return true
+  if (id === 'scene') return canBrowseScenes.value
   if (id === 'inspector') return canEditAllObjects.value || canEditDelegatedObjects.value
   if (id === 'asset') return canManageResources.value
   return canEditAllObjects.value
@@ -1544,7 +1612,9 @@ const sceneListEntries = computed<SceneListEntry[]>(() => {
   const uncategorizedCollapsed = collapsedSceneFolders.value.has(uncategorizedSceneFolderCollapseKey)
   entries.push({ kind: 'uncategorized', key: 'virtual-folder:uncategorized', scenes: uncategorized, collapsed: uncategorizedCollapsed })
   if (!uncategorizedCollapsed) uncategorized.forEach((scene) => entries.push({ kind: 'scene', key: scene.id, scene, nested: true }))
-  return entries
+  return canEditAllObjects.value || canSwitchScene.value
+    ? entries
+    : entries.filter((entry) => entry.kind === 'scene' || entry.scenes.length > 0)
 })
 const draggedSceneId = ref<string | null>(null)
 type SceneDropPlacement = 'before' | 'after'
@@ -1646,7 +1716,7 @@ const handleSceneClick = (scene: StageScene) => {
     beginSceneEdit(scene)
     return
   }
-  if (canSwitchScene.value) emit('sceneSwitchRequested', scene.id)
+  if (canBrowseScenes.value) emit('sceneSwitchRequested', scene.id)
 }
 
 const saveSceneDetails = () => {
@@ -1996,6 +2066,8 @@ const panelMinimums: Record<PanelId, { width: number, height: number }> = {
   inspector: { width: 240, height: 240 },
   layer: { width: 280, height: 220 },
   effect: { width: 320, height: 320 },
+  overlay: { width: 520, height: 360 },
+  floating: { width: 280, height: 220 },
   asset: { width: 320, height: 280 },
 }
 const readPanelLayouts = (): Partial<Record<PanelId, PanelLayout>> => {
@@ -2015,8 +2087,11 @@ const panelDefaultLayout = (id: PanelId): PanelLayout => {
   const workspace = workspaceRef.value
   const workspaceWidth = workspace?.clientWidth || 960
   const workspaceHeight = workspace?.clientHeight || 640
-  const width = id === 'scene' ? 168 : id === 'inspector' ? 280 : id === 'effect' || id === 'asset' ? 340 : 300
-  const height = Math.max(panelMinimums[id].height, workspaceHeight - panelTopInset - 12)
+  const width = id === 'scene' ? 168 : id === 'inspector' ? 280 : id === 'overlay' ? 680 : id === 'floating' ? 340 : id === 'effect' || id === 'asset' ? 340 : 300
+  const availableFloatingHeight = Math.max(1, workspaceHeight - panelTopInset - 12)
+  const height = id === 'floating'
+    ? Math.min(340, Math.max(240, Math.round(availableFloatingHeight * 0.5)))
+    : Math.max(panelMinimums[id].height, workspaceHeight - panelTopInset - 12)
   return {
     x: id === 'scene' ? 12 : Math.max(12, workspaceWidth - width - 12),
     y: panelTopInset,
@@ -2043,7 +2118,19 @@ const clampPanelLayout = (id: PanelId, layout: PanelLayout): PanelLayout => {
 }
 
 const ensurePanelLayout = (id: PanelId) => {
-  const next = clampPanelLayout(id, panelLayouts.value[id] || panelDefaultLayout(id))
+  const stored = panelLayouts.value[id]
+  const floatingLegacyHeight = Math.max(
+    panelMinimums.floating.height,
+    (workspaceRef.value?.clientHeight || 640) - panelTopInset - 12,
+  )
+  const shouldMigrateFloatingDefault = Boolean(
+    id === 'floating'
+    && stored
+    && Number(stored.width) === 680
+    && Number.isFinite(Number(stored.height))
+    && Math.abs(Number(stored.height) - floatingLegacyHeight) <= 4,
+  )
+  const next = clampPanelLayout(id, shouldMigrateFloatingDefault ? panelDefaultLayout(id) : stored || panelDefaultLayout(id))
   panelLayouts.value = { ...panelLayouts.value, [id]: next }
   return next
 }
@@ -2064,7 +2151,8 @@ const panelStyle = (id: PanelId) => {
     top: `${layout.y}px`,
     width: `${layout.width}px`,
     height: `${layout.height}px`,
-    zIndex: frontPanelId.value === id ? '10001' : '10000',
+    // Keep window management reachable above the floating host (10001).
+    zIndex: id === 'floating' ? '10002' : frontPanelId.value === id ? '10001' : '10000',
   }
 }
 
@@ -2091,12 +2179,20 @@ const bringPanelToFront = (id: PanelId) => {
   frontPanelId.value = id
 }
 
+const openOverlayPanel = () => {
+  if (!canOpenPanel('overlay')) return
+  overlayPanelOpen.value = true
+  bringPanelToFront('overlay')
+}
+
 const togglePanel = (id: PanelId) => {
   if (!canOpenPanel(id)) return
   if (id === 'scene') scenePanelOpen.value = !scenePanelOpen.value
   else if (id === 'inspector') inspectorPanelOpen.value = !inspectorPanelOpen.value
   else if (id === 'layer') layerPanelOpen.value = !layerPanelOpen.value
   else if (id === 'effect') effectPanelOpen.value = !effectPanelOpen.value
+  else if (id === 'overlay') overlayPanelOpen.value = !overlayPanelOpen.value
+  else if (id === 'floating') floatingPanelOpen.value = !floatingPanelOpen.value
   else assetPanelOpen.value = !assetPanelOpen.value
 
   const isOpen = id === 'scene'
@@ -2107,7 +2203,9 @@ const togglePanel = (id: PanelId) => {
         ? layerPanelOpen.value
         : id === 'effect'
           ? effectPanelOpen.value
-          : assetPanelOpen.value
+          : id === 'overlay'
+            ? overlayPanelOpen.value
+            : id === 'floating' ? floatingPanelOpen.value : assetPanelOpen.value
   if (isOpen) bringPanelToFront(id)
 }
 
@@ -2121,7 +2219,9 @@ const resetWorkspaceLayout = async () => {
     ['inspector', inspectorPanelOpen.value],
     ['layer', layerPanelOpen.value],
     ['effect', effectPanelOpen.value],
+    ['overlay', overlayPanelOpen.value],
     ['asset', assetPanelOpen.value],
+    ['floating', floatingPanelOpen.value],
   ]
   openPanels.forEach(([id, open]) => {
     if (open) ensurePanelLayout(id)
@@ -2161,7 +2261,7 @@ const observeOpenPanels = () => {
 }
 
 const clampOpenPanels = () => {
-  const ids: PanelId[] = ['scene', 'inspector', 'layer', 'effect', 'asset']
+  const ids: PanelId[] = ['scene', 'inspector', 'layer', 'effect', 'overlay', 'asset', 'floating']
   let changed = false
   const next = { ...panelLayouts.value }
   ids.forEach((id) => {
@@ -2643,6 +2743,292 @@ const selectedObject = computed(() => {
   return isTheaterEffectObject(object) || !canEditObject(object) ? null : object
 })
 
+const hasCharacterDialogueSurface = computed(() => Object.values(props.store.activeObjects.value).some((object) => {
+  if (object.type !== 'iframe') return false
+  const context = parseTheaterDialogueSurfaceUrl(normalizeStageIframeContent(object.content?.iframe).url)
+  return context?.worldId === props.worldId && context.channelId === props.channelId
+}))
+
+type QuickToolTab = 'iform' | 'note' | 'character' | 'dialogue'
+interface QuickToolOption {
+  id: string
+  name: string
+  description: string
+  url: string
+}
+
+const iformStore = useIFormStore()
+const stickyNoteStore = useStickyNoteStore()
+const characterCardStore = useCharacterCardStore()
+const snapshotStore = useChannelCharacterSnapshotStore()
+const utilsStore = useUtilsStore()
+const quickToolPickerOpen = ref(false)
+const quickToolPickerTab = ref<QuickToolTab>('iform')
+const quickToolPickerLoading = ref(false)
+const quickToolPickerError = ref('')
+const quickToolSelection = ref<{ tab: QuickToolTab; option: QuickToolOption } | null>(null)
+const quickToolCharacterQuery = ref('')
+let quickToolPickerEpoch = 0
+
+const quickToolTabs: Array<{ value: QuickToolTab; label: string }> = [
+  { value: 'iform', label: '频道嵌入' },
+  { value: 'note', label: '便签' },
+  { value: 'character', label: '人物卡' },
+  { value: 'dialogue', label: '角色对话框' },
+]
+
+const quickToolUrl = (type: 'iform' | 'note' | 'character', id: string) => (
+  generateInternalSurfaceLink({
+    type,
+    id,
+    worldId: props.worldId,
+    channelId: props.channelId,
+  }, { base: resolveInternalSurfaceLinkBase(utilsStore.config) })
+)
+
+const truncateQuickToolDescription = (value: unknown) => {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  return text.length > 80 ? `${text.slice(0, 80)}…` : text
+}
+
+const dialogueCharacterName = (character: ChatCharactersSnapshotPayload['characters'][number]) => (
+  character.resolvedAppearance.displayName.trim()
+  || character.activeVariantDisplayName?.trim()
+  || character.displayName.trim()
+  || character.identityId
+)
+
+const dialogueCharacterNames = (character: ChatCharactersSnapshotPayload['characters'][number]) => [...new Set([
+  character.displayName,
+  character.resolvedAppearance.displayName,
+  character.activeVariantDisplayName,
+  character.baseAppearance.displayName,
+].map(value => value?.trim()).filter((value): value is string => Boolean(value)))]
+
+const dialogueCharacterOptions = computed<QuickToolOption[]>(() => {
+  const query = quickToolCharacterQuery.value.trim()
+  const characters = props.characterSnapshot.characters
+  let matches = characters
+  if (query) {
+    const identityMatches = characters.filter(character => character.identityId === query)
+    const displayNameMatches = characters.filter(character => character.displayName.trim() === query)
+    const aliasMatches = characters.filter(character => dialogueCharacterNames(character).includes(query))
+    const normalizedQuery = query.toLocaleLowerCase()
+    const fuzzyMatches = characters.filter(character => dialogueCharacterNames(character).some(
+      name => name.toLocaleLowerCase().includes(normalizedQuery),
+    ))
+    matches = identityMatches.length
+      ? identityMatches
+      : displayNameMatches.length
+        ? displayNameMatches
+        : aliasMatches.length
+          ? aliasMatches
+          : fuzzyMatches
+  }
+  return matches.map((character) => {
+    const name = dialogueCharacterName(character)
+    return {
+      id: character.identityId,
+      name,
+      description: `${name} · ${character.identityId}`,
+      url: buildTheaterDialogueSurfaceUrl({
+        identityId: character.identityId,
+        worldId: props.worldId,
+        channelId: props.channelId,
+      }),
+    }
+  })
+})
+
+const quickToolOptionsFor = (tab: QuickToolTab): QuickToolOption[] => {
+  if (tab === 'dialogue') return dialogueCharacterOptions.value
+  if (tab === 'iform') {
+    return (iformStore.formsByChannel[props.channelId] || []).map((form) => ({
+      id: form.id,
+      name: form.name?.trim() || '未命名嵌入',
+      description: form.url ? 'URL 嵌入' : '嵌入代码',
+      url: quickToolUrl('iform', form.id),
+    }))
+  }
+  if (tab === 'note') {
+    return Object.values(stickyNoteStore.notes)
+      .filter((note) => note.channelId === props.channelId)
+      .sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0))
+      .map((note) => ({
+        id: note.id,
+        name: note.title?.trim() || '无标题便签',
+        description: truncateQuickToolDescription(note.contentText || note.noteType),
+        url: quickToolUrl('note', note.id),
+      }))
+  }
+
+  const snapshotItems = snapshotStore.getChannelItems(props.channelId).filter((item) => !!item.data.card)
+  const snapshots = snapshotItems.map((item) => ({
+    id: `snapshot:${props.channelId}:${item.identityId}`,
+    name: item.data.card?.name?.trim() || item.data.identity.displayName?.trim() || item.identityId,
+    description: `人物卡快照 · ${item.data.card?.sheetType || '未分类'}`,
+    url: quickToolUrl('character', `snapshot:${props.channelId}:${item.identityId}`),
+  }))
+  const snapshotCardIds = new Set(snapshotItems.map((item) => item.sourceCardId).filter(Boolean))
+  const cards = characterCardStore.cards
+    .filter((card) => !snapshotCardIds.has(card.id))
+    .map((card) => ({
+      id: card.id,
+      name: card.name?.trim() || '未命名人物卡',
+      description: `人物卡 · ${card.sheetType || '未分类'}`,
+      url: quickToolUrl('character', card.id),
+    }))
+  return [...snapshots, ...cards]
+}
+
+const quickToolPickerStyle = computed(() => {
+  const width = Math.min(440, Math.max(320, (workspaceRef.value?.clientWidth || 960) - 24))
+  const height = Math.min(500, Math.max(320, (workspaceRef.value?.clientHeight || 640) - panelTopInset - 12))
+  const workspaceWidth = workspaceRef.value?.clientWidth || 960
+  return {
+    left: `${Math.max(12, Math.round((workspaceWidth - width) / 2))}px`,
+    top: `${panelTopInset}px`,
+    width: `${width}px`,
+    height: `${height}px`,
+    zIndex: '10002',
+  }
+})
+const quickToolActiveLoading = computed(() => quickToolPickerTab.value !== 'dialogue' && quickToolPickerLoading.value)
+
+const selectQuickTool = (tab: QuickToolTab, option: QuickToolOption) => {
+  quickToolSelection.value = { tab, option }
+}
+
+const isQuickToolOptionSelected = (tab: QuickToolTab, option: QuickToolOption) => {
+  const selection = quickToolSelection.value
+  return selection?.tab === tab && selection.option.id === option.id
+}
+
+const openQuickToolPicker = async () => {
+  const object = selectedObject.value
+  if (!object || object.type !== 'iframe' || !canEditAllObjects.value) return
+  const epoch = ++quickToolPickerEpoch
+  quickToolPickerOpen.value = true
+  quickToolPickerTab.value = 'iform'
+  quickToolSelection.value = null
+  quickToolCharacterQuery.value = ''
+  quickToolPickerError.value = ''
+  quickToolPickerLoading.value = true
+  const worldId = props.worldId
+  const channelId = props.channelId
+  iformStore.bootstrap()
+  const results = await Promise.allSettled([
+    iformStore.ensureForms(channelId),
+    stickyNoteStore.loadChannelNotes(channelId),
+    snapshotStore.initializeChannel(channelId),
+    characterCardStore.loadCards(channelId),
+  ])
+  if (epoch !== quickToolPickerEpoch) return
+  if (worldId !== props.worldId || channelId !== props.channelId) {
+    quickToolPickerLoading.value = false
+    quickToolPickerOpen.value = false
+    return
+  }
+  if (results.some((result) => result.status === 'rejected')) {
+    quickToolPickerError.value = '部分内置工具加载失败，请稍后重试'
+  }
+  quickToolPickerLoading.value = false
+}
+
+const closeQuickToolPicker = () => {
+  quickToolPickerEpoch += 1
+  quickToolPickerOpen.value = false
+  quickToolPickerLoading.value = false
+  quickToolSelection.value = null
+  quickToolCharacterQuery.value = ''
+}
+
+const handleQuickToolTabChange = (value: string) => {
+  if (value !== 'iform' && value !== 'note' && value !== 'character' && value !== 'dialogue') return
+  quickToolPickerTab.value = value
+  quickToolSelection.value = null
+}
+
+const applyQuickToolSelection = () => {
+  const selection = quickToolSelection.value
+  const selected = selection?.option
+  const object = selectedObject.value
+  if (!selected || !object || object.type !== 'iframe' || !canEditAllObjects.value) return
+  if (selection.tab === 'dialogue') {
+    const character = props.characterSnapshot.characters.find(item => item.identityId === selected.id)
+    if (!character) {
+      quickToolSelection.value = null
+      quickToolPickerError.value = '未找到角色'
+      return
+    }
+    const url = resolveSafeStageIframeUrl(selected.url)
+    if (!url) return
+    const name = dialogueCharacterName(character)
+    props.store.beginObjectEdit('添加角色对话框')
+    object.name = `${name} 对话框`
+    object.interactive = true
+    object.aspectRatioLocked = false
+    object.transform = {
+      ...object.transform,
+      width: Number((640 / WORLD_UNIT_PX).toFixed(6)),
+      height: Number((240 / WORLD_UNIT_PX).toFixed(6)),
+    }
+    object.content = { ...object.content, iframe: { url, scale: 1 } }
+    props.store.commitObjectEdit()
+    iframeUrlDraft.value = url
+    closeQuickToolPicker()
+    return
+  }
+  iframeUrlDraft.value = selected.url
+  closeQuickToolPicker()
+  commitSelectedIframeUrl()
+}
+
+const iframeUrlDraft = ref('')
+watch(
+  () => [
+    selectedObject.value?.id,
+    selectedObject.value?.type === 'iframe'
+      ? normalizeStageIframeContent(selectedObject.value.content?.iframe).url
+      : '',
+  ] as const,
+  ([, url]) => { iframeUrlDraft.value = url },
+  { immediate: true },
+)
+
+watch(() => selectedObject.value?.id, () => {
+  if (quickToolPickerOpen.value) closeQuickToolPicker()
+})
+
+const commitSelectedIframeUrl = () => {
+  const object = selectedObject.value
+  if (!object || object.type !== 'iframe' || !canEditAllObjects.value) return
+  const draftUrl = iframeUrlDraft.value.trim()
+  const url = resolveSafeStageIframeUrl(draftUrl)
+  if (draftUrl && !url) return
+  const iframe = normalizeStageIframeContent(object.content?.iframe)
+  if (iframe.url === url) return
+  props.store.beginObjectEdit('修改网页 URL')
+  object.content = { ...object.content, iframe: { ...iframe, url } }
+  props.store.commitObjectEdit()
+}
+
+const selectedIframeScalePercent = computed(() => {
+  const object = selectedObject.value
+  return object?.type === 'iframe'
+    ? normalizeStageIframeContent(object.content?.iframe).scale * 100
+    : 100
+})
+
+const updateSelectedIframeScalePercent = (value: number | null) => {
+  const object = selectedObject.value
+  if (!object || object.type !== 'iframe' || !canEditAllObjects.value || value === null || !Number.isFinite(value)) return
+  const iframe = normalizeStageIframeContent(object.content?.iframe)
+  const scale = normalizeStageIframeContent({ ...iframe, scale: value / 100 }).scale
+  if (iframe.scale === scale) return
+  object.content = { ...object.content, iframe: { ...iframe, scale } }
+}
+
 const isStaticImageObject = (object: StageObject | null | undefined): object is StageObject & { type: 'image' } => (
   object?.type === 'image'
   && Boolean(object.image)
@@ -2912,6 +3298,30 @@ const saveRandomTable = (payload: Extract<StageAction, { type: 'chat.random-tabl
   const action = object?.actions.find((item) => item.id === randomTableEditorActionId.value)
   if (!object || action?.type !== 'chat.random-table') return
   props.store.beginObjectEdit('编辑随机表')
+  action.payload = payload
+  object.interactive = true
+  props.store.commitObjectEdit()
+}
+const clueEditorActionId = ref('')
+const clueEditorVisible = computed({
+  get: () => Boolean(clueEditorActionId.value && selectedObject.value),
+  set: (value) => { if (!value) clueEditorActionId.value = '' },
+})
+const editingClueAction = computed(() => {
+  const action = selectedObject.value?.actions.find((item) => item.id === clueEditorActionId.value)
+  return action?.type === 'clue.execute' ? action : null
+})
+const openClueEditor = (actionId: string) => {
+  const object = selectedObject.value
+  const action = object?.actions.find((item) => item.id === actionId)
+  if (!object || action?.type !== 'clue.execute' || !canEditAllObjects.value) return
+  clueEditorActionId.value = actionId
+}
+const saveClueAction = (payload: Extract<StageAction, { type: 'clue.execute' }>['payload']) => {
+  const object = selectedObject.value
+  const action = object?.actions.find((item) => item.id === clueEditorActionId.value)
+  if (!object || action?.type !== 'clue.execute') return
+  props.store.beginObjectEdit('编辑线索动作')
   action.payload = payload
   object.interactive = true
   props.store.commitObjectEdit()
@@ -3223,6 +3633,7 @@ const layerPreviewIcon = (object: StageObject) => {
   if (object.type === 'drawing') return Pencil
   if (object.type === 'text') return LetterT
   if (object.type === 'button') return Bolt
+  if (object.type === 'iframe') return World
   return Photo
 }
 
@@ -3281,16 +3692,47 @@ const editableCanvasSelectionTarget = (objectId: string) => {
   return targetId && canEditObject(getObject(targetId)) ? targetId : null
 }
 
-const addAction = (type: StageAction['type']) => {
+const addAction = async (type: StageAction['type']) => {
   const object = selectedObject.value
   if (!object || !canEditAllObjects.value) return
-  object.interactive = true
   if (type === 'action.sequence') {
+    object.interactive = true
     const sequence = createStageSequenceAction(props.store.state.activeSceneId, object.id)
     props.store.addObjectAction(object.id, sequence)
     sequenceEditorActionId.value = sequence.id
     return
   }
+  if (type === 'clue.execute') {
+    const objectId = object.id
+    let result: ChatClueOptionsReadResult | undefined
+    try {
+      result = await props.readClueOptions?.()
+    } catch (error) {
+      stageMessage.warning(error instanceof Error ? error.message : '读取线索失败')
+      return
+    }
+    const currentObject = selectedObject.value
+    if (!currentObject || currentObject.id !== objectId || !canEditAllObjects.value) return
+    const clueId = result?.ok ? result.clues[0]?.id || '' : ''
+    if (!clueId) {
+      stageMessage.warning('当前世界暂无可用线索，无法添加线索动作')
+      return
+    }
+    const action: StageAction = {
+      id: actionId(),
+      type,
+      schedule: createDefaultStageActionSchedule(),
+      payload: {
+        version: 1,
+        entries: [{ id: `entry-${actionId()}`, clueId, targets: [], present: true, confirm: false }],
+      },
+    }
+    currentObject.interactive = true
+    if (!props.store.addObjectAction(currentObject.id, action)) return
+    clueEditorActionId.value = action.id
+    return
+  }
+  object.interactive = true
   const action: StageAction = type === 'chat.send'
     ? { id: actionId(), type, schedule: createDefaultStageActionSchedule(), payload: { content: '舞台消息' } }
     : type === 'chat.random-table'
@@ -3651,6 +4093,18 @@ const selectObject = (objectId: string | null, additive = false) => {
   nextTick(updateTransformer)
 }
 
+const handleTheaterWindowBlur = () => {
+  if (iframeInteractionDisabled.value) return
+  const activeElement = document.activeElement
+  if (!(activeElement instanceof HTMLIFrameElement)) return
+  if (!inspectorPanelOpen.value || !canOpenPanel('inspector')) return
+  const objectId = activeElement.dataset.stageObjectId
+  const object = objectId ? getObject(objectId) : null
+  if (!object || object.type !== 'iframe' || !object.interactive) return
+  props.store.selectObject(objectId)
+  nextTick(updateTransformer)
+}
+
 const selectLayerObject = (objectId: string, additive = false) => {
   selectObject(objectId, additive)
   if (props.store.state.selectedObjectId !== objectId) return
@@ -3690,6 +4144,13 @@ const theaterMediaScope = (scope = captureTheaterRequestScope()) => ({
   channelId: scope.channelId,
   scopeType: scope.scopeType,
 })
+
+const resolveTheaterResourceUrl = (resourceId: string, variant = 'original') => {
+  const normalizedResourceId = resourceId.trim()
+  if (!normalizedResourceId) return ''
+  const resourceBase = urlBase.startsWith('//') ? `${window.location.protocol}${urlBase}` : urlBase
+  return `${resourceBase.replace(/\/$/, '')}${theaterResourceContentPath(theaterMediaScope(), normalizedResourceId, variant || 'original')}`
+}
 
 const resolveTheaterStageMedia = (imageRef: StageImageRef) => resolveTheaterStageMediaLocation(imageRef, theaterMediaScope())
 
@@ -3937,15 +4398,30 @@ const pulseScenePreload = (sceneId: string) => {
 const collectSceneMediaItems = (sceneId: string) => {
   const scene = props.store.state.scenes[sceneId]
   if (!scene) return []
-  const refs: Array<{ key: string, imageRef: StageImageRef }> = []
-  if (scene.state.background) refs.push({ key: 'surface:background', imageRef: scene.state.background })
-  if (scene.state.foreground) refs.push({ key: 'surface:foreground', imageRef: scene.state.foreground })
+  const refs: Array<{ key: string, imageRef: StageImageRef, blocksSceneReveal: boolean }> = []
+  if (scene.state.background) refs.push({ key: 'surface:background', imageRef: scene.state.background, blocksSceneReveal: true })
+  if (scene.state.foreground) refs.push({ key: 'surface:foreground', imageRef: scene.state.foreground, blocksSceneReveal: true })
   Object.values({ ...scene.state.sceneObjects, ...props.store.state.persistentObjects })
     .filter((object) => object.type === 'image' && Boolean(object.image))
-    .forEach((object) => refs.push({ key: `object:${object.id}`, imageRef: object.image! }))
-  return refs.flatMap(({ key, imageRef }) => {
+    .forEach((object) => refs.push({ key: `object:${object.id}`, imageRef: object.image!, blocksSceneReveal: true }))
+  scene.state.sceneOverlays.forEach((binding) => {
+    const media = binding.media
+    if (!media?.resourceId) return
+    refs.push({
+      key: `overlay:${binding.id}`,
+      imageRef: {
+        resourceId: media.resourceId,
+        url: resolveTheaterResourceUrl(media.resourceId, media.variant),
+        mimeType: media.mimeType,
+        animated: media.animated,
+        loopCount: media.loopCount,
+      },
+      blocksSceneReveal: false,
+    })
+  })
+  return refs.flatMap(({ key, imageRef, blocksSceneReveal }) => {
     const location = resolveTheaterStageMedia(imageRef)
-    return location ? [{ key, imageRef, location }] : []
+    return location ? [{ key, imageRef, location, blocksSceneReveal }] : []
   })
 }
 
@@ -4715,7 +5191,7 @@ const beginSceneMediaBatch = (sceneId: string, captureCurrent = true, previousSc
   queueSceneEntrances(sceneId, !captureCurrent)
   sceneMediaBatch = {
     sceneId,
-    expected: new Map(collectSceneMediaItems(sceneId).map((item) => [item.key, item.location.url])),
+    expected: new Map(collectSceneMediaItems(sceneId).filter((item) => item.blocksSceneReveal).map((item) => [item.key, item.location.url])),
     settled: new Set(),
     reveals: [],
     activations: [],
@@ -5580,7 +6056,7 @@ const rebuildObjectContent = (wrapper: Konva.Group, object: StageObject) => {
     wrapper.add(createDrawingNode(object.drawing, width, height))
     return
   }
-  if (object.type === 'text') {
+  if (object.type === 'text' || object.type === 'iframe') {
     wrapper.add(new Konva.Rect({
       name: 'theater-object-content',
       width,
@@ -6029,7 +6505,7 @@ const updateObjectNode = (wrapper: Konva.Group, object: StageObject) => {
   })
   if (object.type === 'drawing') {
     return
-  } else if (object.type === 'text') {
+  } else if (object.type === 'text' || object.type === 'iframe') {
     wrapper.findOne<Konva.Rect>('.theater-object-content')?.setAttrs({
       width,
       height,
@@ -6073,6 +6549,7 @@ const syncObjectRootLayers = (objects: Record<string, StageObject>) => {
     let entry = objectRootLayers.get(object.id)
     if (!entry) {
       const layer = new Konva.Layer()
+      layer.getNativeCanvasElement().style.pointerEvents = 'none'
       const camera = new Konva.Group()
       layer.add(camera)
       stage!.add(layer)
@@ -6082,7 +6559,7 @@ const syncObjectRootLayers = (objects: Record<string, StageObject>) => {
     }
     entry.camera.position(worldCameraGroup.position())
     entry.camera.scale(worldCameraGroup.scale())
-    entry.layer.getCanvas()._canvas.style.zIndex = String(canvasZIndex)
+    entry.layer.getNativeCanvasElement().style.zIndex = String(canvasZIndex)
     const node = objectNodes.get(object.id)
     if (node && node.getParent() !== entry.camera) node.moveTo(entry.camera)
   })
@@ -6670,6 +7147,36 @@ const uploadTheaterImageAssets = async (files: File[], folderId: string) => {
   finishUpload()
 }
 
+const uploadSceneOverlayMedia = async (files: File[]) => {
+  if (!canUploadResources.value || !files.length) return
+  theaterImageError.value = ''
+  let folder = sceneOverlayImageFolder.value
+  if (!folder) {
+    const scope = captureTheaterRequestScope()
+    let createError: unknown
+    try {
+      const response = await api.post<{ folder?: TheaterPanelFolder }>(
+        theaterPanelOrganizerPath('folders', scope),
+        { domain: 'image', name: sceneOverlayImageFolderName },
+      )
+      if (!isCurrentTheaterRequestScope(scope)) return
+      folder = response.data?.folder
+    } catch (error) {
+      createError = error
+    }
+    if (!folder) {
+      await fetchTheaterPanelOrganizer()
+      if (!isCurrentTheaterRequestScope(scope)) return
+      folder = sceneOverlayImageFolder.value
+    }
+    if (!folder) {
+      theaterImageError.value = theaterAudioErrorMessage(createError, `创建“${sceneOverlayImageFolderName}”文件夹失败`)
+      return
+    }
+  }
+  await uploadTheaterImageAssets(files, folder.id)
+}
+
 const requestImageUpload = (target: ImageTarget) => {
   pendingImageTarget.value = target
   imageInputRef.value?.click()
@@ -6755,6 +7262,9 @@ const placeCanvasDropObject = (object: StageObject, event: DragEvent, offsetInde
 const handleCanvasDrop = async (event: DragEvent) => {
   const imageAssetId = event.dataTransfer?.getData(THEATER_IMAGE_ASSET_DRAG_TYPE)?.trim() || ''
   if (imageAssetId) {
+    const scope = event.dataTransfer?.getData(THEATER_IMAGE_ASSET_SCOPE_DRAG_TYPE) === 'scene-fixed'
+      ? 'scene-fixed'
+      : 'scene'
     if (!canEditAllObjects.value) return
     let asset = theaterImageAssets.value.find((item) => item.id === imageAssetId)
     if (!asset) {
@@ -6765,7 +7275,7 @@ const handleCanvasDrop = async (event: DragEvent) => {
       theaterImageError.value = '图片素材不存在或资源不可用'
       return
     }
-    const object = props.store.addObject('image')
+    const object = props.store.addObject('image', scope)
     object.name = asset.name
     const dimensions = Number.isFinite(asset.resource.width) && Number.isFinite(asset.resource.height)
       && (asset.resource.width || 0) > 0 && (asset.resource.height || 0) > 0
@@ -7318,6 +7828,7 @@ onMounted(() => {
   window.addEventListener('pointermove', movePanel)
   window.addEventListener('pointerup', stopPanelDrag)
   window.addEventListener('pointercancel', stopPanelDrag)
+  window.addEventListener('blur', handleTheaterWindowBlur)
   window.addEventListener('keydown', handleStageShortcut)
   if (canManageResources.value) void fetchTheaterAudioAssets()
 })
@@ -7424,6 +7935,7 @@ watch(() => [props.syncReady, ...props.permissions], () => {
   if (!canOpenPanel('inspector')) inspectorPanelOpen.value = false
   if (!canOpenPanel('layer')) layerPanelOpen.value = false
   if (!canOpenPanel('effect')) effectPanelOpen.value = false
+  if (!canOpenPanel('overlay')) overlayPanelOpen.value = false
   if (!canOpenPanel('asset')) {
     assetPanelOpen.value = false
     theaterAudioAssets.value = []
@@ -7445,9 +7957,9 @@ watch(
   () => { void fetchTheaterPanelOrganizer() },
   { immediate: true },
 )
-watch([effectPanelOpen, assetPanelOpen], ([effectOpen, assetOpen]) => {
-  if (effectOpen || assetOpen) void fetchTheaterPanelOrganizer()
-  if (assetOpen) void fetchTheaterImageAssets()
+watch([effectPanelOpen, overlayPanelOpen, assetPanelOpen], ([effectOpen, overlayOpen, assetOpen]) => {
+  if (effectOpen || overlayOpen || assetOpen) void fetchTheaterPanelOrganizer()
+  if (overlayOpen || assetOpen) void fetchTheaterImageAssets()
 })
 watch(() => props.store.selection.selectedIds.slice(), () => {
   resourceError.value = ''
@@ -7455,15 +7967,16 @@ watch(() => props.store.selection.selectedIds.slice(), () => {
   else syncObjects()
   updateTransformer()
 })
-watch([scenePanelOpen, inspectorPanelOpen, layerPanelOpen, effectPanelOpen, assetPanelOpen], async (open) => {
+watch([scenePanelOpen, inspectorPanelOpen, layerPanelOpen, effectPanelOpen, overlayPanelOpen, assetPanelOpen, floatingPanelOpen], async (open) => {
   await nextTick()
-  const ids: PanelId[] = ['scene', 'inspector', 'layer', 'effect', 'asset']
+  const ids: PanelId[] = ['scene', 'inspector', 'layer', 'effect', 'overlay', 'asset', 'floating']
   open.forEach((isOpen, index) => {
     if (isOpen) ensurePanelLayout(ids[index])
   })
   observeOpenPanels()
 })
 watch(() => [props.worldId, props.channelId], () => {
+  if (quickToolPickerOpen.value) closeQuickToolPicker()
   if (canManageResources.value) void Promise.all([fetchTheaterAudioAssets(), fetchTheaterImageAssets()])
 })
 watch(theaterAudioMasterVolume, (volume) => {
@@ -7479,6 +7992,8 @@ watch(theaterAudioMasterVolume, (volume) => {
 })
 
 onBeforeUnmount(() => {
+  quickToolPickerEpoch += 1
+  quickToolPickerOpen.value = false
   hideImageAnnotation()
   if (actionDragFrame !== null) window.cancelAnimationFrame(actionDragFrame)
   actionDragFrame = null
@@ -7505,6 +8020,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointermove', movePanel)
   window.removeEventListener('pointerup', stopPanelDrag)
   window.removeEventListener('pointercancel', stopPanelDrag)
+  window.removeEventListener('blur', handleTheaterWindowBlur)
   window.removeEventListener('keydown', handleStageShortcut)
   document.removeEventListener('pointerdown', unlockTheaterAudio, true)
   document.removeEventListener('touchstart', unlockTheaterAudio, true)
@@ -7590,7 +8106,7 @@ onBeforeUnmount(() => {
       </n-dropdown>
       <div v-else class="theater-stage-title" :title="store.activeScene.value.name">{{ store.activeScene.value.name }}</div>
       <n-button-group class="theater-panel-switches" size="small">
-        <n-tooltip v-if="canEditAllObjects || canSwitchScene" trigger="hover">
+        <n-tooltip v-if="canBrowseScenes" trigger="hover">
           <template #trigger>
             <n-button :class="{ 'is-active': scenePanelOpen }" aria-label="切换场景面板" @click="togglePanel('scene')">
               <template #icon><n-icon><LayoutSidebarLeftExpand /></n-icon></template>
@@ -7626,6 +8142,14 @@ onBeforeUnmount(() => {
           </template>
           特效层
         </n-tooltip>
+        <n-tooltip v-if="canEditAllObjects" trigger="hover">
+          <template #trigger>
+            <n-button :class="{ 'is-active': overlayPanelOpen }" aria-label="切换场景叠加管理面板" @click="togglePanel('overlay')">
+              <template #icon><n-icon><CloudRain /></n-icon></template>
+            </n-button>
+          </template>
+          场景叠加
+        </n-tooltip>
         <n-tooltip v-if="canManageResources" trigger="hover">
           <template #trigger>
             <n-button :class="{ 'is-active': assetPanelOpen }" aria-label="切换素材管理器" @click="togglePanel('asset')">
@@ -7633,6 +8157,14 @@ onBeforeUnmount(() => {
             </n-button>
           </template>
           素材管理器
+        </n-tooltip>
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <n-button :class="{ 'is-active': floatingPanelOpen }" aria-label="悬浮窗管理" @click="togglePanel('floating')">
+              <template #icon><n-icon><AppWindow /></n-icon></template>
+            </n-button>
+          </template>
+          悬浮窗管理
         </n-tooltip>
         <n-tooltip trigger="hover">
           <template #trigger>
@@ -7733,6 +8265,26 @@ onBeforeUnmount(() => {
       <n-button-group v-if="canEditAllObjects" class="theater-stage-object-actions" size="small">
         <n-tooltip trigger="hover"><template #trigger><n-button @click="store.addObject('text')"><template #icon><n-icon><LetterT /></n-icon></template></n-button></template>添加文字</n-tooltip>
         <n-tooltip trigger="hover"><template #trigger><n-button @click="store.addObject('image')"><template #icon><n-icon><Photo /></n-icon></template></n-button></template>添加图片面板</n-tooltip>
+        <span class="theater-iframe-trigger-group">
+          <n-tooltip trigger="hover">
+            <template #trigger>
+              <n-button class="theater-iframe-trigger theater-iframe-trigger--primary" aria-label="添加网页" @click="store.addObject('iframe')">
+                <template #icon><n-icon><World /></n-icon></template>
+              </n-button>
+            </template>
+            添加网页
+          </n-tooltip>
+          <n-dropdown trigger="click" :options="iframeInteractionOptions" :menu-props="theaterSecondaryMenuProps" @select="toggleIframeInteraction">
+            <n-button
+              class="theater-iframe-trigger theater-iframe-trigger--menu"
+              :class="{ 'is-active': iframeInteractionDisabled }"
+              :aria-pressed="iframeInteractionDisabled"
+              aria-label="网页组件调整选项"
+            >
+              <template #icon><n-icon><ChevronDown /></n-icon></template>
+            </n-button>
+          </n-dropdown>
+        </span>
       </n-button-group>
       <StageSceneFixedToolbar
         v-if="canEditAllObjects"
@@ -7743,12 +8295,20 @@ onBeforeUnmount(() => {
       </n-button-group>
       <span v-if="canEditAllObjects" class="theater-toolbar-divider" />
       <n-button-group v-if="canEditAllObjects" class="theater-stage-object-actions" size="small">
-        <StageCopyToolbar
-          :mode="copyMode"
-          :disabled="!store.canCopy.value"
-          @copy="copySelectedObjects"
-          @select-mode="copyMode = $event"
-        />
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <n-button
+              class="theater-component-actions-toggle"
+              :class="{ 'is-active': componentActionsExpanded }"
+              :aria-expanded="componentActionsExpanded"
+              aria-label="组件操作"
+              @click="componentActionsExpanded = !componentActionsExpanded"
+            >
+              <template #icon><n-icon><Components /></n-icon></template>
+            </n-button>
+          </template>
+          组件操作
+        </n-tooltip>
         <StageGridToolbar
           :snap-enabled="gridSnapEnabled"
           :display-grid="gridDisplayEnabled"
@@ -7757,6 +8317,35 @@ onBeforeUnmount(() => {
           @toggle-snap="toggleGridSnap"
           @toggle-display-grid="toggleGridDisplay"
           @toggle-grid-on-top="toggleGridOnTop"
+        />
+        <n-tooltip trigger="hover"><template #trigger><n-button :disabled="!store.canUndo.value" aria-label="撤回组件编辑" @click="store.undo"><template #icon><n-icon><ArrowBackUp /></n-icon></template></n-button></template>撤回 Ctrl+Z</n-tooltip>
+      </n-button-group>
+      <n-tooltip trigger="hover">
+        <template #trigger>
+          <n-button class="theater-stage-reset-camera" size="small" quaternary aria-label="复位视角" @click="store.resetCamera">
+            <template #icon><n-icon><Focus /></n-icon></template>
+          </n-button>
+        </template>
+        复位视角
+      </n-tooltip>
+      <span class="theater-stage-zoom">{{ Math.round(store.state.camera.zoom * 100) }}%</span>
+    </header>
+
+    <div
+      v-if="canEditAllObjects && componentActionsExpanded"
+      class="theater-component-actions-toolbar"
+      :class="{ 'is-controls-visible': toolbarColorsVisible }"
+      @pointerenter="revealToolbarColors"
+      @pointerleave="hideToolbarColors"
+      @focusin="revealToolbarColors"
+      @focusout="handleToolbarFocusOut"
+    >
+      <n-button-group class="theater-stage-object-actions" size="small">
+        <StageCopyToolbar
+          :mode="copyMode"
+          :disabled="!store.canCopy.value"
+          @copy="copySelectedObjects"
+          @select-mode="copyMode = $event"
         />
         <n-tooltip trigger="hover">
           <template #trigger>
@@ -7794,30 +8383,25 @@ onBeforeUnmount(() => {
         </n-tooltip>
         <n-tooltip trigger="hover"><template #trigger><n-button :disabled="!store.canCut.value" aria-label="剪切所选组件" @click="store.cutSelectedObjects"><template #icon><n-icon><Cut /></n-icon></template></n-button></template>剪切所选组件 Ctrl+X</n-tooltip>
         <n-tooltip trigger="hover"><template #trigger><n-button :disabled="!store.canPaste.value" aria-label="粘贴组件" @click="store.pasteObject"><template #icon><n-icon><Clipboard /></n-icon></template></n-button></template>粘贴组件 Ctrl+V</n-tooltip>
-        <n-tooltip trigger="hover"><template #trigger><n-button :disabled="!store.canUndo.value" aria-label="撤回组件编辑" @click="store.undo"><template #icon><n-icon><ArrowBackUp /></n-icon></template></n-button></template>撤回 Ctrl+Z</n-tooltip>
         <n-tooltip trigger="hover"><template #trigger><n-button :disabled="!store.selectedObjects.value.length" aria-label="删除所选组件" @click="removeSelectedObjectsWithConfirm"><template #icon><n-icon><Trash /></n-icon></template></n-button></template>删除所选组件 Del / Backspace</n-tooltip>
       </n-button-group>
-      <n-tooltip trigger="hover">
-        <template #trigger>
-          <n-button class="theater-stage-reset-camera" size="small" quaternary aria-label="复位视角" @click="store.resetCamera">
-            <template #icon><n-icon><Focus /></n-icon></template>
-          </n-button>
-        </template>
-        复位视角
-      </n-tooltip>
-      <span class="theater-stage-zoom">{{ Math.round(store.state.camera.zoom * 100) }}%</span>
-    </header>
+    </div>
 
     <div ref="workspaceRef" class="theater-stage-workspace">
       <div
         ref="viewportRef"
         class="theater-stage-viewport"
-        :class="{ 'is-viewing': viewToolActive, 'is-drawing': activeCanvasTool && activeCanvasTool !== 'eraser', 'is-erasing': activeCanvasTool === 'eraser', 'is-quick-deleting': quickDeleteActive }"
+        :class="{ 'is-viewing': viewToolActive, 'is-drawing': activeCanvasTool && activeCanvasTool !== 'eraser', 'is-erasing': activeCanvasTool === 'eraser', 'is-quick-deleting': quickDeleteActive, 'is-iframe-interaction-disabled': iframeInteractionDisabled }"
         @dragover.prevent
         @drop.prevent="handleCanvasDrop"
       >
         <div ref="sceneVisualRef" class="theater-scene-visual">
           <div ref="containerRef" class="theater-stage-canvas" />
+          <SceneOverlayStageHost
+            :scene-id="store.state.activeSceneId"
+            :overlays="store.state.liveState.sceneOverlays"
+            :resolve-resource-url="resolveTheaterResourceUrl"
+          />
           <StageTextOverlay
             :objects="stageObjects"
             :camera="store.state.camera"
@@ -7853,7 +8437,7 @@ onBeforeUnmount(() => {
           :channel-id="channelId"
           @open-character-card="emit('openCharacterCard', $event)"
         />
-        <TheaterDialogueOverlay :runtime="dialogueRuntime" :character-snapshot="characterSnapshot" :world-id="worldId" :channel-id="channelId" />
+        <TheaterDialogueOverlay v-if="!hasCharacterDialogueSurface" :runtime="dialogueRuntime" :character-snapshot="characterSnapshot" :world-id="worldId" :channel-id="channelId" />
         <TheaterEffectOverlay
           :playbacks="effectPlaybacks"
           :selected-object="selectedEffectObject"
@@ -7880,6 +8464,66 @@ onBeforeUnmount(() => {
           />
         </div>
       </div>
+
+      <aside
+        v-if="quickToolPickerOpen"
+        class="theater-floating-panel theater-tool-picker"
+        :style="quickToolPickerStyle"
+        @pointerdown.stop
+      >
+        <div class="theater-panel-heading">
+          <span>快速添加内置工具</span>
+          <n-button class="theater-panel-close" text size="tiny" aria-label="关闭快速添加内置工具" @click="closeQuickToolPicker"><n-icon><X /></n-icon></n-button>
+        </div>
+        <div class="theater-tool-picker__body">
+          <n-tabs
+            :value="quickToolPickerTab"
+            type="line"
+            size="small"
+            animated
+            class="theater-tool-picker__tabs"
+            @update:value="handleQuickToolTabChange"
+          >
+            <n-tab-pane v-for="tab in quickToolTabs" :key="tab.value" :name="tab.value" :tab="tab.label">
+              <div v-if="tab.value === 'dialogue'" class="theater-tool-picker__search" @focusin.stop @focusout.stop>
+                <n-input
+                  v-model:value="quickToolCharacterQuery"
+                  size="small"
+                  clearable
+                  placeholder="输入角色名称或角色 ID"
+                  aria-label="搜索角色名称或角色 ID"
+                />
+              </div>
+              <div class="theater-tool-picker__list">
+                <button
+                  v-for="option in quickToolOptionsFor(tab.value)"
+                  :key="option.id"
+                  type="button"
+                  class="theater-tool-picker__option"
+                  :class="{ 'is-selected': isQuickToolOptionSelected(tab.value, option) }"
+                  @click="selectQuickTool(tab.value, option)"
+                >
+                  <span class="theater-tool-picker__option-main">
+                    <strong>{{ option.name }}</strong>
+                    <small>{{ option.description || '内置工具' }}</small>
+                  </span>
+                  <n-icon v-if="isQuickToolOptionSelected(tab.value, option)"><Select /></n-icon>
+                </button>
+                <div v-if="!quickToolOptionsFor(tab.value).length" class="theater-tool-picker__empty">
+                  {{ tab.value === 'dialogue' ? '未找到角色' : `暂无可用${tab.label}` }}
+                </div>
+              </div>
+            </n-tab-pane>
+          </n-tabs>
+          <div v-if="quickToolActiveLoading" class="theater-tool-picker__status">正在读取可用工具…</div>
+          <div v-else-if="quickToolPickerError" class="theater-tool-picker__status is-error">{{ quickToolPickerError }}</div>
+          <div class="theater-tool-picker__footer">
+            <small v-if="quickToolSelection">已选择：{{ quickToolSelection.option.name }}</small>
+            <span v-else />
+            <n-button size="small" type="primary" :disabled="!quickToolSelection || quickToolActiveLoading" @click="applyQuickToolSelection">确定</n-button>
+          </div>
+        </div>
+      </aside>
 
       <aside v-if="scenePanelOpen && canOpenPanel('scene')" class="theater-floating-panel theater-scene-rail" data-panel-id="scene" :style="panelStyle('scene')" @pointerdown.capture="bringPanelToFront('scene')" @focusin="bringPanelToFront('scene')">
         <div class="theater-panel-heading" @pointerdown="startPanelDrag('scene', $event)">
@@ -7923,6 +8567,7 @@ onBeforeUnmount(() => {
               'is-edit-mode': sceneEditMode,
               'is-batch-mode': sceneBatchMode,
               'has-scene-move-actions': canEditAllObjects,
+              'has-scene-publish-actions': canEditAllObjects && canSwitchScene,
               'is-dragging': draggedSceneId === entry.scene.id,
               'is-drop-before': sceneDropTarget?.id === entry.scene.id && sceneDropTarget.placement === 'before',
               'is-drop-after': sceneDropTarget?.id === entry.scene.id && sceneDropTarget.placement === 'after',
@@ -7964,7 +8609,7 @@ onBeforeUnmount(() => {
                 class="theater-scene-card"
                 :class="{ 'is-active': entry.scene.id === store.state.activeSceneId, 'is-editing': editingSceneId === entry.scene.id, 'is-selected': isSceneBatchSelected(entry.scene.id), 'is-construction-selected': sceneBatchMode === 'construction' && isSceneBatchSelected(entry.scene.id) }"
                 :aria-pressed="sceneBatchMode ? isSceneBatchSelected(entry.scene.id) : undefined"
-                :disabled="sceneEditMode || sceneBatchMode ? !canEditAllObjects : !canSwitchScene"
+                :disabled="sceneEditMode || sceneBatchMode ? !canEditAllObjects : !canBrowseScenes"
                 @click="handleSceneClick(entry.scene)"
               >
                 <span class="theater-scene-card__title">{{ entry.scene.name }}</span>
@@ -8087,6 +8732,12 @@ onBeforeUnmount(() => {
             </div>
             </n-popover>
             <div v-if="(canSwitchScene || canEditAllObjects) && !sceneEditMode && !sceneBatchMode" class="theater-scene-row__actions">
+              <n-tooltip v-if="canEditAllObjects" trigger="hover">
+                <template #trigger>
+                  <n-button quaternary circle size="tiny" :type="entry.scene.published ? 'primary' : 'default'" :aria-pressed="entry.scene.published" aria-label="展示给玩家" @click.stop="store.setScenePublished(entry.scene.id, !entry.scene.published)"><n-icon><Eye /></n-icon></n-button>
+                </template>
+                展示给玩家
+              </n-tooltip>
               <n-dropdown v-if="canEditAllObjects" trigger="click" :options="sceneMoveOptions(entry.scene)" :menu-props="theaterSecondaryMenuProps" @select="moveSceneFromMenu($event, entry.scene.id)">
                 <n-button quaternary circle size="tiny" aria-label="移动场景到文件夹" @click.stop><template #icon><n-icon><Dots /></n-icon></template></n-button>
               </n-dropdown>
@@ -8231,6 +8882,41 @@ onBeforeUnmount(() => {
               <label>内容</label>
               <n-input v-model:value="selectedObject.text" type="textarea" :autosize="{ minRows: 2, maxRows: 5 }" />
             </template>
+            <template v-else-if="selectedObject.type === 'iframe' && canEditAllObjects">
+              <label>URL</label>
+              <div @focusin.stop @focusout.stop>
+                <n-input
+                  :value="iframeUrlDraft"
+                  size="small"
+                  placeholder="https://example.com"
+                  @update:value="iframeUrlDraft = $event"
+                  @blur="commitSelectedIframeUrl"
+                  @keyup.enter="commitSelectedIframeUrl"
+                />
+              </div>
+              <n-button
+                class="theater-quick-tool-button"
+                size="small"
+                secondary
+                :loading="quickToolPickerLoading"
+                @click="openQuickToolPicker"
+              >
+                <template #icon><n-icon><Plus /></n-icon></template>
+                快速添加内置工具
+              </n-button>
+              <label>网页缩放</label>
+              <n-input-number
+                :value="selectedIframeScalePercent"
+                :min="STAGE_IFRAME_MIN_SCALE * 100"
+                :max="STAGE_IFRAME_MAX_SCALE * 100"
+                :step="5"
+                :precision="0"
+                size="small"
+                @update:value="updateSelectedIframeScalePercent"
+              >
+                <template #suffix>%</template>
+              </n-input-number>
+            </template>
             <template v-if="selectedObject.type === 'image' && canEditObject(selectedObject)">
               <label>图片</label>
               <div class="theater-image-actions">
@@ -8332,7 +9018,7 @@ onBeforeUnmount(() => {
                 <n-input-number v-model:value="selectedObject.drawing.sides" :min="5" :max="12" />
               </template>
             </template>
-            <template v-if="!['text', 'image', 'group', 'drawing'].includes(selectedObject.type)">
+            <template v-if="!['text', 'image', 'iframe', 'group', 'drawing'].includes(selectedObject.type)">
               <label>颜色</label>
               <n-input v-model:value="selectedObject.fill" />
             </template>
@@ -8386,6 +9072,7 @@ onBeforeUnmount(() => {
                 <n-button size="tiny" @click="addAction('chat.insert')">插入</n-button>
                 <n-button size="tiny" @click="addAction('scene.apply')">场景</n-button>
                 <n-button size="tiny" :disabled="!effectActionOptions.length" @click="addAction('effect.play')">特效</n-button>
+                <n-button size="tiny" @click="addAction('clue.execute')">线索</n-button>
                 <n-button size="tiny" @click="addAction('object.toggle')">显隐</n-button>
                 <n-button size="tiny" @click="addAction('action.sequence')">组合</n-button>
               </div>
@@ -8439,6 +9126,7 @@ onBeforeUnmount(() => {
                   <n-select v-else-if="action.type === 'scene.apply'" v-model:value="action.payload.sceneId" class="theater-action-row__target" :options="store.scenes.value.map((scene) => ({ label: scene.name, value: scene.id }))" size="tiny" filterable :menu-props="theaterSecondaryMenuProps" />
                   <n-select v-else-if="action.type === 'effect.play'" v-model:value="action.payload.effectId" class="theater-action-row__target" :options="effectActionOptions" size="tiny" filterable :menu-props="theaterSecondaryMenuProps" />
                   <n-select v-else-if="action.type === 'object.toggle'" v-model:value="action.payload.objectId" class="theater-action-row__target" :options="Object.values(store.activeObjects.value).map((item) => ({ label: item.name, value: item.id }))" size="tiny" filterable :menu-props="theaterSecondaryMenuProps" />
+                  <n-button v-else-if="action.type === 'clue.execute'" class="theater-action-row__target" size="tiny" secondary @click="openClueEditor(action.id)">编辑线索 · {{ action.payload.entries.length }} 条</n-button>
                   <n-button v-else class="theater-action-row__target" size="tiny" secondary @click="openSequenceEditor(action.id)">编辑组合 · {{ action.payload.steps.length }} 项</n-button>
                   <n-input-number
                     v-if="selectedObject.metadata.actionExecutionMode === 'sequential'"
@@ -8556,6 +9244,13 @@ onBeforeUnmount(() => {
               <n-button size="tiny" quaternary type="error" :disabled="!store.state.liveState[surface.target]" @click="clearImage({ kind: 'scene', target: surface.target })">清除</n-button>
             </div>
           </template>
+          <div class="theater-scene-overlay-settings-row">
+            <label>场景叠加效果</label>
+            <div class="theater-image-actions">
+              <small>{{ store.state.liveState.sceneOverlays.length }} 个 · {{ store.state.liveState.sceneOverlays.filter(item => item.enabled).length }} 已启用</small>
+              <n-button size="tiny" quaternary aria-label="配置场景叠加效果" @click="openOverlayPanel"><template #icon><n-icon><Settings /></n-icon></template></n-button>
+            </div>
+          </div>
           <small v-if="resourceError" class="theater-resource-error">{{ resourceError }}</small>
         </div>
         <div class="theater-panel-heading theater-layer-list-heading">
@@ -8777,6 +9472,42 @@ onBeforeUnmount(() => {
         />
       </aside>
 
+      <aside v-if="overlayPanelOpen && canOpenPanel('overlay')" class="theater-floating-panel theater-overlay-panel" data-panel-id="overlay" :style="panelStyle('overlay')" @pointerdown.capture="bringPanelToFront('overlay')" @focusin="bringPanelToFront('overlay')">
+        <div class="theater-panel-heading" @pointerdown="startPanelDrag('overlay', $event)">
+          <span>场景叠加管理</span>
+          <div class="theater-panel-heading__actions">
+            <small>{{ store.state.liveState.sceneOverlays.length }}</small>
+            <n-button class="theater-panel-close" text size="tiny" aria-label="关闭场景叠加管理面板" @click="overlayPanelOpen = false"><n-icon><X /></n-icon></n-button>
+          </div>
+        </div>
+        <SceneOverlayManagerPanel
+          :store="store"
+          :world-id="props.worldId"
+          :channel-id="props.channelId"
+          :scope-type="props.scopeType"
+          :preset-refresh-token="sceneOverlayPresetRefreshToken"
+          :can-edit="canEditAllObjects"
+          :image-assets="sceneOverlayImageAssets"
+          :image-loading="theaterImageLoading"
+          :image-uploading="theaterImageUploading"
+          :image-error="theaterImageError"
+          :can-upload-media="canUploadResources"
+          :can-edit-media="canUploadResources || canDeleteResources"
+          :can-delete-media="canDeleteResources"
+          @upload-media="uploadSceneOverlayMedia"
+          @rename-media="renameTheaterImageAsset"
+          @delete-media="deleteTheaterImageAsset"
+        />
+      </aside>
+
+      <aside v-if="floatingPanelOpen" class="theater-floating-panel" data-panel-id="floating" :style="panelStyle('floating')" @pointerdown.capture="bringPanelToFront('floating')" @focusin="bringPanelToFront('floating')">
+        <div class="theater-panel-heading" @pointerdown="startPanelDrag('floating', $event)">
+          <span>悬浮窗管理</span>
+          <n-button class="theater-panel-close" text size="tiny" aria-label="关闭悬浮窗管理" title="关闭悬浮窗管理" @click="floatingPanelOpen = false"><n-icon><X /></n-icon></n-button>
+        </div>
+        <TheaterFloatingManagerPanel :windows="floatingWindows || []" :channel-options="floatingChannelOptions || []" @action="emit('floatingWindowAction', $event)" />
+      </aside>
+
       <aside v-if="assetPanelOpen && canOpenPanel('asset')" class="theater-floating-panel theater-asset-panel" data-panel-id="asset" :style="panelStyle('asset')" @pointerdown.capture="bringPanelToFront('asset')" @focusin="bringPanelToFront('asset')">
         <div class="theater-panel-heading" @pointerdown="startPanelDrag('asset', $event)">
           <span>素材管理器</span>
@@ -8851,6 +9582,8 @@ onBeforeUnmount(() => {
       :scenes="store.scenes.value"
       :persistent-objects="store.state.persistentObjects"
       :active-scene-id="store.state.activeSceneId"
+      :read-clue-options="readClueOptions"
+      :read-clue-access="readClueAccess"
     />
     <TheaterRandomTableEditor
       v-model:show="randomTableEditorVisible"
@@ -8858,13 +9591,21 @@ onBeforeUnmount(() => {
       :action="editingRandomTableAction"
       @save="saveRandomTable"
     />
+    <TheaterClueActionEditor
+      v-model:show="clueEditorVisible"
+      :component-name="selectedObject?.name || ''"
+      :action="editingClueAction"
+      :read-options="readClueOptions"
+      :read-access="readClueAccess"
+      @save="saveClueAction"
+    />
     <n-modal
       :show="sceneFolderDialogVisible"
       :mask-closable="false"
       :close-on-esc="true"
       @update:show="value => { if (!value) closeSceneFolderDialog() }"
     >
-      <section class="theater-scene-folder-dialog" role="dialog" aria-modal="true" :aria-label="sceneFolderDialogMode === 'create' ? '新建场景文件夹' : '重命名场景文件夹'">
+      <div class="theater-scene-folder-dialog" role="dialog" aria-modal="true" :aria-label="sceneFolderDialogMode === 'create' ? '新建场景文件夹' : '重命名场景文件夹'">
         <header class="theater-scene-folder-dialog__header">
           <div>
             <strong>{{ sceneFolderDialogMode === 'create' ? '新建场景文件夹' : '重命名场景文件夹' }}</strong>
@@ -8886,7 +9627,7 @@ onBeforeUnmount(() => {
           <n-button @click="closeSceneFolderDialog">取消</n-button>
           <n-button type="primary" @click="submitSceneFolderDialog">确定</n-button>
         </footer>
-      </section>
+      </div>
     </n-modal>
     <n-modal v-model:show="packageProgressVisible" :mask-closable="false" :closable="false" preset="card" title="小剧场导入进度" class="theater-package-progress-modal">
       <div class="theater-package-progress">
@@ -9009,7 +9750,29 @@ onBeforeUnmount(() => {
 .theater-stage-toolbar :deep(.n-button) {
   transition: color .18s ease, background-color .18s ease, border-color .18s ease, box-shadow .18s ease;
 }
-.theater-stage-toolbar:not(.is-controls-visible) :deep(.n-button:not(:disabled)) {
+.theater-component-actions-toolbar {
+  position: absolute; z-index: 9999; top: 46px; right: 180px; box-sizing: border-box; min-width: 0; width: max-content;
+  max-width: calc(100% - 188px); height: 40px; display: flex; align-items: center; gap: 7px; padding: 0 8px;
+  overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid transparent;
+  background: transparent; box-shadow: none; scrollbar-width: none;
+  transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+.theater-component-actions-toolbar.is-controls-visible {
+  border-bottom-color: var(--sc-border-mute, rgba(255, 255, 255, .08));
+  background: color-mix(in srgb, var(--sc-bg-header, #262626) 92%, transparent);
+  box-shadow: 0 5px 18px rgba(0, 0, 0, .2);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+}
+.theater-component-actions-toolbar::-webkit-scrollbar { display: none; }
+.theater-component-actions-toolbar > .theater-stage-object-actions { margin-left: auto; }
+.theater-component-actions-toolbar :deep(.n-button) {
+  transition: color .18s ease, background-color .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+@media (max-width: 700px) {
+  .theater-component-actions-toolbar { right: 8px; max-width: calc(100% - 16px); }
+}
+.theater-stage-toolbar:not(.is-controls-visible) :deep(.n-button:not(:disabled)),
+.theater-component-actions-toolbar:not(.is-controls-visible) :deep(.n-button:not(:disabled)) {
   --n-color: transparent !important;
   --n-color-hover: transparent !important;
   --n-color-pressed: transparent !important;
@@ -9027,7 +9790,8 @@ onBeforeUnmount(() => {
   border-color: transparent !important;
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .72));
 }
-.theater-stage-toolbar:not(.is-controls-visible) :deep(.n-button.is-active:not(:disabled)) {
+.theater-stage-toolbar:not(.is-controls-visible) :deep(.n-button.is-active:not(:disabled)),
+.theater-component-actions-toolbar:not(.is-controls-visible) :deep(.n-button.is-active:not(:disabled)) {
   box-shadow: inset 0 -2px rgba(255, 255, 255, .82) !important;
 }
 .theater-toolbar-exit, .theater-grid-snap-tool, .theater-bulk-select-tool, .theater-quick-delete-tool, .theater-panel-switches, .theater-stage-object-actions { flex: 0 0 auto; }
@@ -9045,6 +9809,7 @@ onBeforeUnmount(() => {
 .theater-stage-object-actions :deep(.theater-copy-trigger--primary),
 .theater-stage-object-actions :deep(.theater-scene-fixed-trigger--primary),
 .theater-stage-object-actions :deep(.theater-grid-trigger--primary),
+.theater-stage-object-actions :deep(.theater-iframe-trigger--primary),
 .theater-stage-object-actions :deep(.theater-drawing-trigger--primary) {
   --n-width: 30px !important;
   --n-padding: 0 !important;
@@ -9054,14 +9819,22 @@ onBeforeUnmount(() => {
 .theater-stage-object-actions :deep(.theater-copy-trigger--menu),
 .theater-stage-object-actions :deep(.theater-scene-fixed-trigger--menu),
 .theater-stage-object-actions :deep(.theater-grid-trigger--menu),
+.theater-stage-object-actions :deep(.theater-iframe-trigger--menu),
 .theater-stage-object-actions :deep(.theater-drawing-trigger--menu) {
   --n-width: 18px !important;
   --n-padding: 0 !important;
   width: 18px;
   min-width: 18px;
 }
+.theater-iframe-trigger-group { display: inline-flex; flex: 0 0 auto; }
+.theater-stage-object-actions :deep(.theater-iframe-trigger) { padding: 0; border-radius: 0; }
+.theater-stage-object-actions :deep(.theater-iframe-trigger--primary) { border-radius: 3px 0 0 3px; }
+.theater-stage-object-actions :deep(.theater-iframe-trigger--menu) { margin-left: -1px; border-radius: 0 3px 3px 0; }
+.theater-stage-object-actions :deep(.theater-iframe-trigger--menu.is-active) {
+  color: #fff; background: var(--theater-accent); border-color: var(--theater-accent);
+}
 .theater-bulk-select-badge { display: inline-flex; }
-.theater-grid-snap-tool.is-active, .theater-bulk-select-tool.is-active, .theater-panel-switches :deep(.n-button.is-active) {
+.theater-grid-snap-tool.is-active, .theater-bulk-select-tool.is-active, .theater-component-actions-toggle.is-active, .theater-panel-switches :deep(.n-button.is-active) {
   color: #fff; background: var(--theater-accent); border-color: var(--theater-accent);
 }
 .theater-quick-delete-tool.is-active { color: #fff; background: #dc2626; border-color: #dc2626; }
@@ -9094,6 +9867,8 @@ onBeforeUnmount(() => {
 .theater-stage-zoom { width: 38px; flex: 0 0 38px; color: var(--sc-text-secondary, #b5b5c5); font-size: 11px; text-align: right; }
 .theater-stage-workspace { position: relative; min-height: 0; flex: 1; overflow: hidden; }
 .theater-stage-viewport { position: absolute; inset: 0; min-width: 0; min-height: 0; overflow: hidden; isolation: isolate; background: #343435; touch-action: none; }
+.theater-stage-viewport.is-iframe-interaction-disabled :deep(.theater-iframe-visual-object),
+.theater-stage-viewport.is-iframe-interaction-disabled :deep(.theater-iframe-visual-object__frame) { pointer-events: none !important; }
 .theater-scene-visual { position: absolute; z-index: 0; inset: 0; overflow: hidden; transform-origin: center; will-change: opacity, transform, filter, clip-path; }
 .theater-stage-viewport :global(.theater-scene-transition-overlay) { position: absolute; z-index: 0; inset: 0; overflow: hidden; pointer-events: none; transform-origin: center; will-change: opacity, transform, filter, clip-path; }
 .theater-stage-viewport :global(.theater-scene-transition-overlay > canvas) { position: absolute; inset: 0; width: 100%; height: 100%; }
@@ -9141,8 +9916,33 @@ onBeforeUnmount(() => {
 .theater-scene-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 6px 6px; }
 .theater-object-inspector { min-width: min(240px, 100%); min-height: min(240px, 100%); overflow: hidden; }
 .theater-object-inspector > .theater-inspector { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.theater-tool-picker { min-width: min(320px, 100%); min-height: min(320px, 100%); }
+.theater-tool-picker__body { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 8px; padding: 8px; }
+.theater-tool-picker__tabs { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; }
+.theater-tool-picker__tabs :deep(.n-tabs-nav) { flex: 0 0 auto; }
+.theater-tool-picker__tabs :deep(.n-tabs-content) { min-height: 0; flex: 1 1 auto; overflow: hidden; }
+.theater-tool-picker__tabs :deep(.n-tabs-pane-wrapper) { min-height: 0; flex: 1 1 auto; overflow: hidden; }
+.theater-tool-picker__tabs :deep(.n-tab-pane) { height: 100%; display: flex; flex-direction: column; }
+.theater-tool-picker__search { flex: 0 0 auto; padding-top: 8px; }
+.theater-tool-picker__list { min-height: 0; flex: 1 1 auto; overflow-y: auto; display: grid; align-content: start; gap: 4px; padding-top: 8px; }
+.theater-tool-picker__option {
+  width: 100%; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 8px 9px; border: 1px solid var(--sc-border-mute, rgba(255, 255, 255, .1)); border-radius: 5px;
+  color: var(--sc-text-primary, #f4f4f5); background: color-mix(in srgb, var(--theater-panel) 78%, transparent); text-align: left; cursor: pointer; transition: border-color .14s ease, background .14s ease;
+}
+.theater-tool-picker__option:hover { border-color: color-mix(in srgb, var(--theater-accent) 55%, transparent); background: color-mix(in srgb, var(--theater-accent) 10%, var(--theater-panel)); }
+.theater-tool-picker__option.is-selected { border-color: var(--theater-accent); background: color-mix(in srgb, var(--theater-accent) 16%, transparent); }
+.theater-tool-picker__option > .n-icon { flex: 0 0 auto; color: var(--theater-accent, #38bdf8); }
+.theater-tool-picker__option-main { min-width: 0; flex: 1; display: grid; gap: 3px; }
+.theater-tool-picker__option-main strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.theater-tool-picker__option-main small { overflow: hidden; color: var(--sc-text-secondary, #b5b5c5); font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.theater-tool-picker__empty, .theater-tool-picker__status { padding: 28px 12px; color: var(--sc-fg-muted, #71717a); font-size: 11px; text-align: center; }
+.theater-tool-picker__status { padding: 4px 0; }
+.theater-tool-picker__status.is-error { color: #fbbf24; }
+.theater-tool-picker__footer { min-height: 32px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 8px; border-top: 1px solid var(--sc-border-mute, rgba(255, 255, 255, .08)); }
+.theater-tool-picker__footer small { min-width: 0; overflow: hidden; color: var(--sc-text-secondary, #b5b5c5); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .theater-layer-panel { min-width: min(280px, 100%); min-height: min(220px, 100%); }
 .theater-effect-panel { min-width: min(320px, 100%); min-height: min(320px, 100%); }
+.theater-overlay-panel { min-width: min(520px, 100%); min-height: min(360px, 100%); }
 .theater-asset-panel { min-width: min(320px, 100%); min-height: min(280px, 100%); }
 .theater-panel-heading {
   height: 32px; flex: 0 0 32px; display: flex; align-items: center; justify-content: space-between; padding: 0 8px;
@@ -9163,6 +9963,7 @@ onBeforeUnmount(() => {
 .theater-scene-row:hover .theater-scene-row__actions, .theater-scene-row:has(button:focus-visible) .theater-scene-row__actions, .theater-scene-row.has-preload-pulse .theater-scene-row__actions { opacity: 1; pointer-events: auto; }
 .theater-scene-row:hover .theater-scene-card, .theater-scene-row:has(button:focus-visible) .theater-scene-card, .theater-scene-row.has-preload-pulse .theater-scene-card { padding-right: 36px; }
 .theater-scene-row.has-scene-move-actions:hover .theater-scene-card, .theater-scene-row.has-scene-move-actions:has(button:focus-visible) .theater-scene-card, .theater-scene-row.has-scene-move-actions.has-preload-pulse .theater-scene-card { padding-right: 66px; }
+.theater-scene-row.has-scene-publish-actions:hover .theater-scene-card, .theater-scene-row.has-scene-publish-actions:has(button:focus-visible) .theater-scene-card, .theater-scene-row.has-scene-publish-actions.has-preload-pulse .theater-scene-card { padding-right: 96px; }
 .theater-scene-row.is-dragging { opacity: .36; }
 .theater-scene-row.is-drag-preview {
   position: fixed; z-index: 10003; top: 0; left: 0; pointer-events: none; opacity: .92;
@@ -9234,6 +10035,9 @@ onBeforeUnmount(() => {
 .theater-media-settings { display: grid; gap: 5px; padding: 9px; border-bottom: 1px solid var(--sc-border-mute, rgba(255, 255, 255, .08)); }
 .theater-media-settings label, .theater-inspector label { color: var(--sc-fg-muted, #71717a); font-size: 10px; }
 .theater-image-actions { display: flex; align-items: center; gap: 4px; }
+.theater-scene-overlay-settings-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 3px; border-top: 1px solid var(--sc-border-mute, rgba(255, 255, 255, .08)); }
+.theater-scene-overlay-settings-row .theater-image-actions { min-width: 0; }
+.theater-scene-overlay-settings-row small { overflow: hidden; color: var(--sc-text-secondary); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .theater-entrance-editor { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
 .theater-surface-settings { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; display: grid; gap: 11px; overflow: hidden; }
 .theater-surface-settings > * { min-width: 0; }

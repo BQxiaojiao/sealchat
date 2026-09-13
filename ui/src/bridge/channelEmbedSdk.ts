@@ -1,3 +1,4 @@
+import type { TheaterDialogueMessagePayload, TheaterDialogueMessageRemovedPayload } from '../views/theater/bridge/theater-bridge-protocol'
 import {
   CHANNEL_EMBED_EVENT,
   CHANNEL_EMBED_HANDSHAKE,
@@ -37,10 +38,45 @@ export interface EmbedWorldAdmin {
   avatar?: string
   role: 'owner' | 'admin'
 }
+export interface EmbedCharacterCardApiStatus {
+  available: boolean
+  reason?: string
+}
+export interface EmbedCharacterCard {
+  name: string
+  sheetType: string
+  attrs: Record<string, any>
+  avatar?: string
+}
+export interface EmbedCharacterCardSnapshot {
+  identityId: string
+  userId: string
+  identity: {
+    id: string
+    userId: string
+    displayName?: string
+    color?: string
+    avatar?: string
+  }
+  card: EmbedCharacterCard | null
+  revision: number
+  updatedAt?: number
+}
+export interface EmbedCharacterCardCurrentResult {
+  status: EmbedCharacterCardApiStatus
+  card: EmbedCharacterCard | null
+}
+export interface EmbedCharacterCardUpdateResult {
+  updated: boolean
+  status: EmbedCharacterCardApiStatus
+  message?: string
+}
 export interface EmbedPermissionSummary {
   canSendMessage: boolean
   canReadMembers: boolean
   canReadCharacters: boolean
+  canReadCharacterCard: boolean
+  canWriteCharacterCard: boolean
   canReadStorage: boolean
   canWriteStorage: boolean
   canPublishEvents: boolean
@@ -49,6 +85,13 @@ export interface EmbedPermissionSummary {
   isWorldAdmin: boolean
   isSystemAdmin: boolean
   canManageWorld: boolean
+}
+export interface EmbedUploadedImage {
+  attachmentId: string
+  url: string
+  filename: string
+  mimeType: string
+  size: number
 }
 
 export class ChannelEmbedClient {
@@ -158,6 +201,9 @@ export class ChannelEmbedClient {
   }
   close(event?: EmbedEvent) {
     if (this.closed) return
+    if (!event) {
+      try { this.port.postMessage({ type: CHANNEL_EMBED_REQUEST, version: 1, sessionId: this.sessionId, requestId: randomEmbedId('close'), method: 'session.close', contextVersion: this.contextVersion }) } catch { /* already detached */ }
+    }
     this.closed = true
     this.pending.forEach((pending) => { clearTimeout(pending.timer); pending.reject(new SealChatEmbedError({ code: 'SESSION_EXPIRED', message: 'Embed session closed' })) })
     this.pending.clear()
@@ -165,14 +211,29 @@ export class ChannelEmbedClient {
       try { handler(event) } catch { /* subscriber errors must not break cleanup */ }
     })
     this.closedHandlers.clear()
+    this.handlers.clear()
     this.port.close()
   }
 
   readonly context = { get: () => this.request('context.get'), onChanged: (handler: EventHandler) => this.on('context.changed', handler) }
+  readonly theater = { dialogue: {
+    subscribe: (params: { identityId: string }) => this.request<{ identityId: string }>('theater.dialogue.subscribe', params),
+    unsubscribe: () => this.request('theater.dialogue.unsubscribe'),
+    onCreated: (handler: (payload: TheaterDialogueMessagePayload) => void) => this.on('theater.dialogue.created', handler),
+    onUpdated: (handler: (payload: TheaterDialogueMessagePayload) => void) => this.on('theater.dialogue.updated', handler),
+    onRemoved: (handler: (payload: TheaterDialogueMessageRemovedPayload) => void) => this.on('theater.dialogue.removed', handler),
+  } }
   readonly user = { getCurrent: () => this.request('user.getCurrent') }
   readonly member = { getCurrent: () => this.request('member.getCurrent') }
   readonly members = { list: (params: { scope: EmbedMemberListScope; cursor?: string }) => this.request<EmbedSafeMember[] | EmbedWorldAdmin[]>('members.list', params), onChanged: (handler: EventHandler) => this.on('members.changed', handler) }
   readonly characters = { list: () => this.request('characters.list'), getCurrent: () => this.request('characters.getCurrent'), onChanged: (handler: EventHandler) => this.on('characters.changed', handler) }
+  readonly characterCard = {
+    getStatus: () => this.request<EmbedCharacterCardApiStatus>('characterCard.getStatus'),
+    getCurrent: () => this.request<EmbedCharacterCardCurrentResult>('characterCard.getCurrent'),
+    listSnapshots: () => this.request<EmbedCharacterCardSnapshot[]>('characterCard.listSnapshots'),
+    getSnapshot: (params: { identityId: string }) => this.request<EmbedCharacterCardSnapshot | null>('characterCard.getSnapshot', params),
+    updateAttrs: (attrsPatch: Record<string, any>) => this.request<EmbedCharacterCardUpdateResult>('characterCard.updateAttrs', { attrs: attrsPatch }),
+  }
   readonly permissions = { getCurrent: () => this.request<EmbedPermissionSummary>('permissions.getCurrent'), onChanged: (handler: EventHandler) => this.on('permissions.changed', handler) }
   readonly channel = { getState: () => this.request('channel.getState') }
   readonly connection = { getState: () => this.request('connection.getState'), onChanged: (handler: EventHandler) => this.on('connection.changed', handler) }
@@ -192,6 +253,12 @@ export class ChannelEmbedClient {
       return this.on(`event:${topic}`, handler)
     },
     off: (topic: string, handler: EventHandler) => this.off(`event:${topic}`, handler),
+  }
+  readonly attachments = {
+    uploadImage: (file: File | Blob, options?: { filename?: string }) => this.request<EmbedUploadedImage>('attachments.uploadImage', {
+      file,
+      filename: options?.filename,
+    }, 60_000),
   }
   readonly messages = { send: (params: { text: string; replyTo?: string; identityId?: string; identityVariantId?: string; icMode?: 'ic' | 'ooc' }) => this.request('messages.send', params) }
 }

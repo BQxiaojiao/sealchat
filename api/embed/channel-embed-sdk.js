@@ -52,6 +52,20 @@
         getCurrent: () => this.request('characters.getCurrent'),
         onChanged: handler => this.on('characters.changed', handler)
       }
+      this.theater = { dialogue: {
+        subscribe: params => this.request('theater.dialogue.subscribe', params),
+        unsubscribe: () => this.request('theater.dialogue.unsubscribe'),
+        onCreated: handler => this.on('theater.dialogue.created', handler),
+        onUpdated: handler => this.on('theater.dialogue.updated', handler),
+        onRemoved: handler => this.on('theater.dialogue.removed', handler)
+      } }
+      this.characterCard = {
+        getStatus: () => this.request('characterCard.getStatus'),
+        getCurrent: () => this.request('characterCard.getCurrent'),
+        listSnapshots: () => this.request('characterCard.listSnapshots'),
+        getSnapshot: params => this.request('characterCard.getSnapshot', params),
+        updateAttrs: attrsPatch => this.request('characterCard.updateAttrs', { attrs: attrsPatch })
+      }
       this.permissions = {
         getCurrent: () => this.request('permissions.getCurrent'),
         onChanged: handler => this.on('permissions.changed', handler)
@@ -77,6 +91,12 @@
           return this.on(`event:${topic}`, handler)
         },
         off: (topic, handler) => this.off(`event:${topic}`, handler)
+      }
+      this.attachments = {
+        uploadImage: (file, options) => this.request('attachments.uploadImage', {
+          file,
+          filename: options && options.filename
+        }, 60000)
       }
       this.messages = { send: params => this.request('messages.send', params) }
       port.onmessage = message => this.handleMessage(message.data)
@@ -186,6 +206,9 @@
 
     close(event) {
       if (this.closed) return
+      if (!event) {
+        try { this.port.postMessage({ type: CHANNEL_EMBED_REQUEST, version: 1, sessionId: this.sessionId, requestId: randomEmbedId('close'), method: 'session.close', contextVersion: this.contextVersion }) } catch (_) { /* already detached */ }
+      }
       this.closed = true
       this.pending.forEach(pending => {
         clearTimeout(pending.timer)
@@ -196,6 +219,7 @@
         try { handler(event) } catch (_) { /* subscriber errors must not break cleanup */ }
       })
       this.closedHandlers.clear()
+      this.handlers.clear()
       this.port.close()
     }
   }

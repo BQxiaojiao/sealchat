@@ -19,6 +19,8 @@ import {
   Id as CharacterCardIcon,
   Message2 as CharacterRemarkIcon,
 	Dice as Dice3DIcon,
+  Bulb as ClueBoxIcon,
+  LayoutBoard as ClueBoardIcon,
 } from '@vicons/tabler'
 import { DocumentTextOutline } from '@vicons/ionicons5'
 import { MailOutline } from '@vicons/ionicons5'
@@ -61,6 +63,11 @@ interface Props {
   icOocSplitActive?: boolean
   stickyNoteEnabled?: boolean
   stickyNoteActive?: boolean
+  clueBoxEnabled?: boolean
+  clueBoxActive?: boolean
+  clueBoxAttention?: boolean
+	clueBoardEnabled?: boolean
+	clueBoardActive?: boolean
 	dice3dEnabled?: boolean
 	dice3dActive?: boolean
   webhookEnabled?: boolean
@@ -87,7 +94,10 @@ interface Emits {
   (e: 'open-split'): void
   (e: 'open-theater'): void
   (e: 'open-ic-ooc-split', side: 'left' | 'right'): void
+  (e: 'open-inline-chat-split'): void
   (e: 'toggle-sticky-note'): void
+  (e: 'toggle-clue-box'): void
+	(e: 'open-clue-board'): void
 	(e: 'open-dice3d'): void
   (e: 'open-webhook'): void
   (e: 'open-bridge-status'): void
@@ -123,6 +133,7 @@ interface ActionButton {
 
 const SPLIT_DUAL_MORE_LEFT_KEY = 'ic-ooc-split:left'
 const SPLIT_DUAL_MORE_RIGHT_KEY = 'ic-ooc-split:right'
+const SPLIT_DUAL_MORE_INLINE_KEY = 'ic-ooc-split:inline'
 const splitChooserExpanded = ref(false)
 const dualSplitActionRef = ref<HTMLElement | null>(null)
 
@@ -141,6 +152,8 @@ const allActionButtons = computed<ActionButton[]>(() => {
     { key: 'export', label: '导出记录', icon: DownloadIcon, emitEvent: 'open-export', activeKey: 'exportActive' },
     { key: 'gallery', label: '表情资源', icon: EmojiIcon, emitEvent: 'open-gallery', activeKey: 'galleryActive' },
     { key: 'channel-images', label: '图片浏览', icon: PhotoIcon, emitEvent: 'open-channel-images', activeKey: 'channelImagesActive' },
+    { key: 'clue-box', label: props.clueBoxAttention ? '线索箱 ·' : '线索箱', icon: ClueBoxIcon, emitEvent: 'toggle-clue-box', activeKey: 'clueBoxActive', disabled: () => props.clueBoxEnabled === false },
+    { key: 'clue-board', label: '线索画板', icon: ClueBoardIcon, emitEvent: 'open-clue-board', activeKey: 'clueBoardActive', disabled: () => props.clueBoardEnabled === false || props.clueBoxEnabled === false },
     { key: 'battle-summary', label: '战报总结', icon: DocumentTextOutline, emitEvent: 'open-battle-summary', activeKey: 'battleSummaryActive', disabled: () => props.battleSummaryEnabled === false },
     { key: 'favorites', label: '频道收藏', icon: StarIcon, emitEvent: 'open-favorites', activeKey: 'favoriteActive' },
     { key: 'character-remark', label: '角色备注', icon: CharacterRemarkIcon, emitEvent: 'open-character-remark', activeKey: 'characterRemarkActive' },
@@ -239,6 +252,7 @@ const moreMenuOptions = computed(() => {
         children: [
           { key: SPLIT_DUAL_MORE_LEFT_KEY, label: '左场内', disabled },
           { key: SPLIT_DUAL_MORE_RIGHT_KEY, label: '右场内', disabled },
+          { key: SPLIT_DUAL_MORE_INLINE_KEY, label: '页内分屏', disabled },
         ],
       }
     }
@@ -258,6 +272,10 @@ const handleMoreMenuSelect = (key: string) => {
   }
   if (key === SPLIT_DUAL_MORE_RIGHT_KEY) {
     emit('open-ic-ooc-split', 'right')
+    return
+  }
+  if (key === SPLIT_DUAL_MORE_INLINE_KEY) {
+    emit('open-inline-chat-split')
     return
   }
   const button = allActionButtons.value.find(btn => btn.key === key)
@@ -297,8 +315,12 @@ const handleSplitChooserFocusOut = (event: FocusEvent) => {
   splitChooserExpanded.value = false
 }
 
-const handleSplitChooserSelect = (side: 'left' | 'right') => {
+const handleSplitChooserSelect = (side: 'left' | 'right' | 'inline') => {
   splitChooserExpanded.value = false
+  if (side === 'inline') {
+    emit('open-inline-chat-split')
+    return
+  }
   emit('open-ic-ooc-split', side)
 }
 
@@ -516,7 +538,11 @@ const cycleIcFilter = () => {
     </div>
 
     <!-- 功能入口区域 -->
-    <div class="ribbon-section ribbon-section--actions" ref="actionsContainerRef">
+    <div
+      class="ribbon-section ribbon-section--actions"
+      :class="{ 'is-split-chooser-expanded': splitChooserExpanded }"
+      ref="actionsContainerRef"
+    >
       <div class="ribbon-actions-viewport">
         <div class="ribbon-actions-grid">
           <template v-for="button in visibleButtons" :key="button.key">
@@ -556,6 +582,13 @@ const cycleIcFilter = () => {
                   @click.stop="handleSplitChooserSelect('right')"
                 >
                   右场内
+                </button>
+                <button
+                  type="button"
+                  class="ribbon-dual-split__choice ribbon-dual-split__choice--inline"
+                  @click.stop="handleSplitChooserSelect('inline')"
+                >
+                  页内分屏
                 </button>
               </div>
             </div>
@@ -739,6 +772,10 @@ const cycleIcFilter = () => {
   flex-wrap: nowrap;
 }
 
+.ribbon-section--actions.is-split-chooser-expanded {
+  overflow: visible;
+}
+
 .ribbon-section--summary {
   flex-shrink: 0;
   min-width: 0;
@@ -816,11 +853,15 @@ const cycleIcFilter = () => {
 
 .ribbon-dual-split__overlay {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: auto;
+  bottom: 0;
+  left: 50%;
+  width: max(100%, 15rem);
   display: flex;
   opacity: 0;
   pointer-events: none;
-  transform: scale(0.985);
+  transform: translateX(-50%) scale(0.985);
   transition: opacity 0.18s ease, transform 0.18s ease;
   border-radius: 999px;
   overflow: hidden;
@@ -833,7 +874,7 @@ const cycleIcFilter = () => {
 .ribbon-dual-split__overlay.is-expanded {
   opacity: 1;
   pointer-events: auto;
-  transform: scale(1);
+  transform: translateX(-50%) scale(1);
 }
 
 .ribbon-dual-split.is-expanded .ribbon-dual-split__trigger {
@@ -841,7 +882,7 @@ const cycleIcFilter = () => {
 }
 
 .ribbon-dual-split__choice {
-  flex: 1 1 50%;
+  flex: 1 1 33.333%;
   min-width: 0;
   border: none;
   background: transparent;
@@ -849,7 +890,8 @@ const cycleIcFilter = () => {
   font-size: 0.78rem;
   font-weight: 600;
   letter-spacing: 0.01em;
-  padding: 0 0.35rem;
+  padding: 0 0.2rem;
+  white-space: nowrap;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -866,6 +908,10 @@ const cycleIcFilter = () => {
 
 .ribbon-dual-split__choice--right {
   background: color-mix(in srgb, #f59e0b 12%, var(--sc-bg-elevated));
+}
+
+.ribbon-dual-split__choice--inline {
+  background: color-mix(in srgb, #3b82f6 12%, var(--sc-bg-elevated));
 }
 
 .ribbon-dual-split__choice:hover {
@@ -896,6 +942,10 @@ const cycleIcFilter = () => {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
+}
+
+.ribbon-section--actions.is-split-chooser-expanded .ribbon-actions-viewport {
+  overflow: visible;
 }
 
 .ribbon-actions-anchor {
@@ -934,6 +984,10 @@ const cycleIcFilter = () => {
 
 :root[data-display-palette='night'] .ribbon-dual-split__choice--right {
   background: color-mix(in srgb, #fbbf24 16%, var(--sc-bg-elevated));
+}
+
+:root[data-display-palette='night'] .ribbon-dual-split__choice--inline {
+  background: color-mix(in srgb, #60a5fa 16%, var(--sc-bg-elevated));
 }
 
 .ribbon-action-button.is-active {

@@ -4,6 +4,7 @@ import { computed, h, onMounted, reactive, ref } from 'vue'
 import { NButton, NSpace, useMessage, useDialog } from 'naive-ui'
 import { api } from '@/stores/_config'
 import { triggerBlobDownload } from '@/utils/download'
+import { readHtmlFile } from '@/utils/htmlFile'
 
 interface TemplateItem {
   ref: string
@@ -27,6 +28,7 @@ const editingId = ref('')
 const items = ref<TemplateItem[]>([])
 const searchText = ref('')
 const importFileInputRef = ref<HTMLInputElement | null>(null)
+const templateHtmlFileInputRef = ref<HTMLInputElement | null>(null)
 const filteredItems = computed(() => {
   const query = searchText.value.trim().toLowerCase()
   if (!query) return items.value
@@ -48,13 +50,25 @@ const columns = [
       h(NButton, { size: 'small', tertiary: true, type: 'error', onClick: () => deleteTemplate(row) }, { default: () => '删除' }),
     ] }) },
 ]
-const defaultBridgeCapabilities = 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send'
+const defaultBridgeCapabilities = 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send,attachments.upload'
 const form = reactive({
   name: '', description: '', url: '', embedCode: '', defaultWidth: 640, defaultHeight: 360,
   defaultCollapsed: false, defaultFloating: false, allowPopout: true, enabled: true,
   mediaOptions: { autoPlay: false, autoUnmute: false, autoExpand: false, allowAudio: true, allowVideo: true },
   bridgePolicy: { enabled: true, allowedOrigins: '', capabilities: defaultBridgeCapabilities },
 })
+
+const hasBridgeCapability = (capability: string) => form.bridgePolicy.capabilities
+  .split(',').map((item) => item.trim()).filter(Boolean).includes(capability)
+
+const toggleBridgeCapability = (capability: string, enabled: boolean) => {
+  const capabilities = new Set(form.bridgePolicy.capabilities.split(',').map((item) => item.trim()).filter(Boolean))
+  if (enabled) capabilities.add(capability)
+  else capabilities.delete(capability)
+  form.bridgePolicy.capabilities = [...capabilities].join(',')
+}
+
+const setImageUploadCapability = (enabled: boolean) => toggleBridgeCapability('attachments.upload', enabled)
 
 const reset = () => {
   editingId.value = ''
@@ -107,6 +121,26 @@ const load = async () => {
 }
 
 const openCreate = () => { reset(); modalVisible.value = true }
+
+const triggerTemplateHtmlUpload = () => {
+  if (!templateHtmlFileInputRef.value) return
+  templateHtmlFileInputRef.value.value = ''
+  templateHtmlFileInputRef.value.click()
+}
+
+const handleTemplateHtmlUpload = async (event: Event) => {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  try {
+    form.embedCode = await readHtmlFile(file)
+    message.success('HTML 文件已读取')
+  } catch (error: any) {
+    message.error(error?.message || '读取 HTML 文件失败')
+  }
+}
+
 const openEdit = async (item: TemplateItem) => {
   if (item.origin !== 'platform') return
   reset()
@@ -275,7 +309,19 @@ onMounted(load)
         <n-form-item label="名称"><n-input v-model:value="form.name" /></n-form-item>
         <n-form-item label="描述"><n-input v-model:value="form.description" type="textarea" /></n-form-item>
         <n-form-item label="URL"><n-input v-model:value="form.url" /></n-form-item>
-        <n-form-item label="嵌入代码"><n-input v-model:value="form.embedCode" type="textarea" :rows="4" /></n-form-item>
+        <n-form-item label="嵌入代码">
+          <n-space vertical size="small" style="width: 100%;">
+            <input
+              ref="templateHtmlFileInputRef"
+              type="file"
+              accept=".html,.htm,text/html"
+              hidden
+              @change="handleTemplateHtmlUpload"
+            />
+            <n-button size="small" secondary @click="triggerTemplateHtmlUpload">上传HTML文件</n-button>
+            <n-input v-model:value="form.embedCode" type="textarea" :rows="4" />
+          </n-space>
+        </n-form-item>
         <n-form-item label="宽 × 高"><n-space><n-input-number v-model:value="form.defaultWidth" :min="1" /><n-input-number v-model:value="form.defaultHeight" :min="1" /></n-space></n-form-item>
         <n-form-item label="默认状态">
           <n-space size="small" :wrap="true">
@@ -316,7 +362,17 @@ onMounted(load)
           </n-switch>
         </n-form-item>
         <n-form-item label="允许来源"><n-input v-model:value="form.bridgePolicy.allowedOrigins" placeholder="以逗号分隔，例如 https://example.com" /></n-form-item>
-        <n-form-item label="能力列表"><n-input v-model:value="form.bridgePolicy.capabilities" placeholder="以逗号分隔，例如 resize,fullscreen" /></n-form-item>
+        <n-form-item label="能力列表">
+          <n-space vertical size="small">
+            <n-input v-model:value="form.bridgePolicy.capabilities" placeholder="以逗号分隔，例如 resize,fullscreen" />
+            <n-checkbox
+              :checked="hasBridgeCapability('attachments.upload')"
+              @update:checked="setImageUploadCapability"
+            >
+              上传图片附件（attachments.upload）
+            </n-checkbox>
+          </n-space>
+        </n-form-item>
       </n-form>
       <template #footer><n-space justify="end"><n-button @click="modalVisible = false">取消</n-button><n-button type="primary" @click="save">保存</n-button></n-space></template>
     </n-modal>

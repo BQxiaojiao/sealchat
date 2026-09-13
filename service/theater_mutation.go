@@ -508,6 +508,8 @@ func applyTheaterSceneUpdate(tx *gorm.DB, room *model.TheaterRoomModel, actorID 
 			updates["sort_order"] = jsonNumberInt64(value)
 		case "locked":
 			updates["locked"] = value
+		case "published":
+			updates["published"] = value
 		case "folderId":
 			updates["folder_id"] = strings.TrimSpace(fmt.Sprint(value))
 		case "state":
@@ -1069,6 +1071,13 @@ func recalculateTheaterResourceReferences(tx *gorm.DB, roomID string) error {
 	}
 	for _, asset := range imageAssets {
 		counts[asset.ResourceID]++
+	}
+	var overlayPresets []model.TheaterSceneOverlayPresetModel
+	if err := tx.Where("room_id = ?", roomID).Find(&overlayPresets).Error; err != nil {
+		return err
+	}
+	for _, preset := range overlayPresets {
+		countResourceIDsInJSON(preset.OverlaysJSON, counts)
 	}
 	if err := tx.Model(&model.TheaterResourceModel{}).Where("room_id = ?", roomID).Update("reference_count", 0).Error; err != nil {
 		return err

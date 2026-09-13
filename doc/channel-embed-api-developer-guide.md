@@ -29,6 +29,26 @@ console.log(context.currentCharacter)
 
 ## 2. 接入
 
+### 小剧场透明角色对话订阅
+
+`theater.dialogue.subscribe` 是非默认、只读的 Host 本地 capability。普通模板及旧 iForm 不会自动获得它；需要在实例策略中显式授予。内置模板 `builtin:theater-dialogue-overlay` 可在同一频道重复安装，每个实例通过自身 Storage 绑定一个 identity。
+
+```js
+const offCreated = sealchat.theater.dialogue.onCreated(message => { /* 入队播放 */ })
+const offUpdated = sealchat.theater.dialogue.onUpdated(message => { /* 更新或移除失效消息 */ })
+const offRemoved = sealchat.theater.dialogue.onRemoved(({ messageId }) => { /* 移除 */ })
+await sealchat.theater.dialogue.subscribe({ identityId: '频道角色 ID' })
+// 切换角色前清空本地播放队列；重复 subscribe 会替换旧订阅。
+await sealchat.theater.dialogue.unsubscribe()
+offCreated(); offUpdated(); offRemoved()
+```
+
+事件为 `theater.dialogue.created`、`theater.dialogue.updated`、`theater.dialogue.removed`。前两者复用现有 `TheaterDialogueMessagePayload`，removed 仅含 `{ messageId }`。created 只包含可进入小剧场队列的公开、未归档、未删除 IC 角色消息；updated 若变成 whisper、OOC、归档、删除或空正文，接收方应从 runtime 移除。created/updated 只定向发送给匹配频道与 identity 的 session；removed 在当前频道的 dialogue 订阅内分发。每个 session 同时最多订阅一个 identity，session 关闭或策略变化会释放订阅，重新握手后需重新订阅。
+
+此能力复用宿主已经存在的聊天连接，不建立额外 WebSocket、不轮询、不读取消息历史。仅在实际订阅后监听宿主聊天事件，多实例共享一次消息序列化；最后一个订阅释放后解绑监听。
+
+### 2.1 内部接入
+
 SealChat 后端提供无需登录的 SDK 地址。频道 `srcdoc` 嵌入会自动注入 `window.__SEALCHAT_EMBED_CONFIG__`；频道 iForm 使用单独 `<iframe src>` 时，宿主会自动追加 `hostOrigin` 与 `sdkUrl` 查询参数；脱离 SealChat 宿主的外部 URL iframe 则需自行提供实际地址：
 
 ```js
@@ -71,12 +91,84 @@ const sealchat = await SealChatEmbed.connect({
 
 `SealChatEmbed.connect()` resolve 表示 Embed Session 握手成功，但不要把“握手成功”等同于“已经收到一次连接状态事件”。新建 Session 时，宿主不保证主动补发 `connection.changed`；`connection.onChanged()` 用于监听后续变化，客户端应在握手成功后主动调用一次 `connection.getState()` 初始化 UI 和本地状态。推荐先注册监听，再读取初始状态，以避免只依赖事件导致状态栏长期停留在“连接中”。
 
-iForm 管理员必须启用 Embed API、允许嵌入页 origin，并授予所需 Capability。`world.admins.read` 已加入新建 iForm 默认能力；旧 iForm 的已保存 policy 不会自动升级，请在编辑器的“能力”字段追加 `world.admins.read` 后保存。
+iForm 管理员必须启用 Embed API、允许嵌入页 origin，并授予所需 Capability。`world.admins.read`、`characterCard.read`、`characterCard.write` 和 `attachments.upload` 已加入新建 iForm 默认能力。
+
+普通独立 iForm 已保存的 BridgePolicy 不会因为版本升级自动追加新 capability，需要管理员显式修改后保存。通过内置模板安装的 iForm，如果没有对 BridgePolicy 设置 TemplateOverrides，则有效权限会继续跟随对应 builtin manifest；如果已经保存了 BridgePolicy override，则继续以 override 为准。
+
+常用 Channel Embed capability 包括：`context.read`、`user.read`、`members.read`、`world.admins.read`、`characters.read`、`characterCard.read`、`characterCard.write`、`permissions.read`、`storage.read`、`storage.write`、`events.subscribe`、`events.publish`、`messages.send`、`attachments.upload`。
+
+另外，SealChat 内置小剧场工具还使用专用 capability：`theater.dialogue.subscribe`。
 
 连接断开分两类：
 
 - SealChat WebSocket 暂时离线：保留 SDK Client，监听 `connection.onChanged()`；宿主负责 WebSocket 重连。
 - Embed Session 失效：监听 `client.session.onClosed()`，丢弃旧 Client，再调用 `SealChatEmbed.connect()` 建立新 Session。重连必须重新握手，不能复用旧 `sessionId`。
+
+### 2.2 外部接入SDK
+
+Channel Embed API 不要求工具源码托管在 SealChat 内。部署在其他域名的第三方网页同样可以作为频道 iForm 的 iframe 工具接入 SealChat API。
+
+外部工具需要加载当前 SealChat 实例提供的 SDK：
+
+```html
+<script src="https://chat.example.com/api/v1/channel-embed-sdk.js"></script>
+```
+
+如果 SealChat 配置了 `WebUrl` 前缀，应使用包含该前缀的实际 SDK 地址。
+
+随后通过父级 SealChat 的 origin 建立 Embed Session：
+
+```js
+const sealchat = await SealChatEmbed.connect({
+  targetOrigin: 'https://chat.example.com'
+})
+
+const context = await sealchat.context.get()
+const currentCard = await sealchat.characterCard.getCurrent()
+```
+
+外部网址工具需要同时满足以下条件：
+
+- 该网页通过 SealChat 的频道 iForm / iframe 打开；
+- iForm 已启用 Embed API；
+- iForm 的 `allowedOrigins` 允许外部网页所在的 origin；
+- iForm 已授予工具实际需要的 Capability，例如 `context.read`、`characterCard.read`、`characterCard.write`、`storage.read` 等。
+
+例如，工具部署在：
+
+```text
+https://tool.example.com
+```
+
+则应在对应 iForm 的 Embed API 策略中允许：
+
+```text
+https://tool.example.com
+```
+
+外部工具与内置工具使用完全相同的 SDK 和 Capability 模型。它不会获得 SealChat 的 Cookie、Token、原始 WebSocket 或内部 Store，只能调用宿主明确授予的 Embed API。
+
+因此可以使用外部网页实现角色卡面板、战斗面板、地图、骰点工具、音乐控制器等功能，而无需为每个工具单独实现 SealChat 通讯桥接。
+
+需要注意：SDK 不是独立的远程 SealChat 客户端。Embed Session 依赖父级 SealChat iframe 宿主完成握手，因此单独在普通浏览器标签页打开第三方网页，即使加载了 SDK，也无法直接建立 Embed Session。
+
+如果外部工具需要同时兼容“SealChat 内嵌模式”和“普通网页独立模式”，可以检测是否存在宿主配置后再初始化 SDK：
+
+```js
+const config = window.__SEALCHAT_EMBED_CONFIG__
+
+if (window.parent !== window && config?.hostOrigin) {
+  const sealchat = await SealChatEmbed.connect({
+    targetOrigin: config.hostOrigin
+  })
+
+  // SealChat 内嵌模式
+} else {
+  // 普通独立网页模式
+}
+```
+
+对于通过 SealChat 创建的外部 URL iForm，宿主会提供 `hostOrigin` 与 `sdkUrl` 等接入信息；第三方工具应优先使用宿主提供的实际配置，不要硬编码某个固定 SealChat 实例地址。
 
 ## 3. API 一览
 
@@ -152,6 +244,74 @@ interface SafeCharacter {
 
 `character` 是频道 identity，不是 Guild 权限 Role。不要在业务代码中把它命名为 `role`。
 
+### 人物卡属性与人物卡快照
+
+`characters.*` 是频道 identity API；`characterCard.*` 才是人物卡属性 API。两者命名空间和权限独立。
+
+| API | Capability | 说明 |
+| --- | --- | --- |
+| `characterCard.getStatus()` | `characterCard.read` | 读取当前频道 BOT 人物卡 API 可用状态及禁用原因 |
+| `characterCard.getCurrent()` | `characterCard.read` | 读取当前用户在当前频道的实时活动人物卡 |
+| `characterCard.listSnapshots()` | `characterCard.read` | 读取当前频道已授权的人物卡快照 |
+| `characterCard.getSnapshot({ identityId })` | `characterCard.read` | 按 `identityId` 读取当前频道单个快照 |
+| `characterCard.updateAttrs(attrsPatch)` | `characterCard.write` | 更新当前登录用户自己的当前活动人物卡 |
+
+当前用户实时活动人物卡的数据链路：
+
+```text
+Embed API
+→ characterCard Store
+→ character.get / character.set
+→ 当前频道主控 BOT / SealDice
+```
+
+当前频道其他用户人物卡的数据链路：
+
+```text
+Embed API
+→ ChannelCharacterSnapshot Store
+→ character.snapshot.list
+→ SealChat 服务端快照
+```
+
+`getCurrent()` 返回当前用户的实时 BOT 人物卡。BOT 人物卡 API 未开启、不支持或不可用时，`status.available` 为 `false`，`status.reason` 保留 SealChat 现有提示文本，`card` 为 `null`。这与 API 可用但没有活动人物卡是两种状态。
+
+`listSnapshots()` 和 `getSnapshot()` 返回当前频道经服务端授权的快照。用户没有发布人物卡时，快照仍可能包含 identity 和用户信息，但 `card` 为 `null`。快照不会向 BOT 查询其他用户的实时人物卡。BOT 人物卡 API 未开启时，快照读取仍可工作；只有实时当前人物卡读取和写入受 availability 影响。
+
+Embed API 不允许指定任意 `user_id`、`channelId` 或人物卡名称。`updateAttrs()` 只能修改当前登录用户自己的当前活动人物卡。无频道成员身份或处于 observer mode 时，`characterCard.write` 不会出现在 effective capabilities 中。Capability 不会跳过现有人物卡或频道权限检查。
+
+`attrsPatch` 使用根级浅合并。`{ hp: 8 }` 只覆盖根属性 `hp`，不删除其他根属性。嵌套对象不做 deep merge；修改 `$忍神` 一类根节点时，调用方必须提交该根节点的完整对象。
+
+```js
+const client = await SealChatEmbed.connect({
+  targetOrigin: HOST_ORIGIN
+})
+
+const status = await client.characterCard.getStatus()
+const current = await client.characterCard.getCurrent()
+const snapshots = await client.characterCard.listSnapshots()
+const another = await client.characterCard.getSnapshot({
+  identityId: 'identity-id'
+})
+
+await client.characterCard.updateAttrs({
+  hp: 8,
+  san: 42
+})
+```
+
+不可用状态处理：
+
+```js
+const current = await client.characterCard.getCurrent()
+
+if (!current.status.available) {
+  console.log(current.status.reason)
+}
+```
+
+旧 iForm 不会自动获得 `characterCard.read` / `characterCard.write`；管理员需在能力字段手工追加后保存。
+
 ### 权限与连接
 
 | API | Capability | 结果 / 用途 |
@@ -172,6 +332,8 @@ interface EmbedPermissionSummary {
   canSendMessage: boolean
   canReadMembers: boolean
   canReadCharacters: boolean
+  canReadCharacterCard: boolean
+  canWriteCharacterCard: boolean
   canReadStorage: boolean
   canWriteStorage: boolean
   canPublishEvents: boolean
@@ -320,6 +482,38 @@ await sealchat.messages.send({
 ```
 
 未指定 `identityId` 时使用当前激活角色。指定角色或变体时，必须属于当前频道且当前用户有权使用。
+
+### 图片附件上传
+
+| API | Capability | 说明 |
+| --- | --- | --- |
+| `attachments.uploadImage(file, options?)` | `attachments.upload` | 通过 Host 代理上传当前 Embed Session 用户的图片附件 |
+
+```ts
+interface EmbedUploadedImage {
+  attachmentId: string
+  url: string
+  filename: string
+  mimeType: string
+  size: number
+}
+
+const input = document.querySelector('input[type=file]')!
+const image = await sealchat.attachments.uploadImage(input.files![0])
+console.log(image.url)
+
+const canvas = document.querySelector('canvas')!
+const blob = await new Promise<Blob | null>(resolve =>
+  canvas.toBlob(resolve, 'image/png')
+)
+const mapImage = await sealchat.attachments.uploadImage(blob!, {
+  filename: 'battle-map.png',
+})
+```
+
+该 API 仅接受 `File | Blob`，且 MIME 必须是 `image/*`。请求由 ChannelEmbedHost 代理，iframe 不会获得 SealChat token、cookie、Authorization header 或原始 WebSocket，也不能指定任意 `channelId`、`userId`、`ownerUserId`、`rootId`、`parentId` 或其他附件内部关系。Host 使用当前登录态调用标准 `POST /api/v1/attachment-upload`，随后立即调用 `POST /api/v1/attachment-confirm` 并设置 `isTemp: false`；上传附件归当前 Embed Session 的已认证用户。
+
+Host 复用现有 `compressImage()`：非 GIF 图片沿用 `imageCompressQuality`、默认 2048 尺寸和 WebP 策略，GIF 按现有逻辑保留原文件。普通 Embed RPC 默认超时为 10 秒，图片上传单独使用 60 秒。返回的 `url` 是兼容 SealChat `WebUrl`/base path 的 absolute URL，可直接用于 `<img src>`；附件接口可能进一步重定向至 S3。Session 用户变化、退出登录或频道上下文失效时沿用 `SESSION_EXPIRED` / `CONTEXT_CHANGED`；缺少 capability 返回 `CAPABILITY_DENIED`，参数错误返回 `INVALID_PARAMS`，图片或上传大小超限尽量返回 `PAYLOAD_TOO_LARGE`。
 
 ### Client 通用方法
 

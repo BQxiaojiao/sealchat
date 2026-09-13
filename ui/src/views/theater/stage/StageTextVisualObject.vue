@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import RichTextContent from '@/components/rich-text/RichTextContent.vue'
 import { WORLD_UNIT_PX, type StageEntrancePlayback, type StageObject } from '../shared/stage-types'
 import { compareStageLayersBottomToTop } from './stage-layer-order'
+import StageIframeVisualObject from './StageIframeVisualObject.vue'
 
 defineOptions({ name: 'StageTextVisualObject' })
 
@@ -127,6 +128,10 @@ onBeforeUnmount(() => {
         autoplay
       />
     </div>
+    <StageIframeVisualObject
+      v-else-if="props.object.type === 'iframe'"
+      :object="props.object"
+    />
     <StageTextVisualObject
       v-for="child in children"
       :key="`${child.id}:${props.entrancePlaybacks[child.id]?.token || 0}`"

@@ -3,7 +3,7 @@ import ChatItem from './components/chat-item.vue';
 import MultiSelectFloatingBar from './components/MultiSelectFloatingBar.vue';
 import MessageForwardDialog from './components/MessageForwardDialog.vue';
 import { VirtualList } from 'vue-tiny-virtual-list';
-import { chatEvent, useChatStore, type PendingMessageJump } from '@/stores/chat';
+import { chatEvent, useChatStore, type InlineChatSplitOpenPayload, type PendingMessageJump } from '@/stores/chat';
 import type { Event, Message, User } from '@satorijs/protocol'
 import type { AvatarDecoration, ChannelIdentity, ChannelIdentityFolder, ChannelIdentityManageCandidate, ChannelIdentityVariant, GalleryItem, UserInfo, SChannel, WhisperMeta } from '@/types'
 import { useUserStore } from '@/stores/user';
@@ -16,9 +16,11 @@ import GalleryButton from '@/components/gallery/GalleryButton.vue'
 import GalleryPanel from '@/components/gallery/GalleryPanel.vue'
 import ChatIcOocToggle from './components/ChatIcOocToggle.vue'
 import ChatActionRibbon from './components/ChatActionRibbon.vue'
+import InlineChatSplitWindow from './components/InlineChatSplitWindow.vue'
 import ChatAiPolishDock from './components/ChatAiPolishDock.vue'
 import ChannelFavoriteBar from './components/ChannelFavoriteBar.vue'
 import ChannelFavoriteManager from './components/ChannelFavoriteManager.vue'
+import WorldMessageToastStack, { type WorldMessageToastPayload } from './components/WorldMessageToastStack.vue'
 import ChannelRemarkManager from './components/ChannelRemarkManager.vue'
 import DisplaySettingsModal from './components/DisplaySettingsModal.vue'
 import IcOocRoleConfigPanel from './components/IcOocRoleConfigPanel.vue'
@@ -38,6 +40,7 @@ import IFormFloatingWindows from '@/components/iform/IFormFloatingWindows.vue';
 import IFormDrawer from '@/components/iform/IFormDrawer.vue';
 import IFormEmbedInstances from '@/components/iform/IFormEmbedInstances.vue';
 import StickyNoteManager from './components/StickyNoteManager.vue';
+import WorldClueBox from './components/clue-box/WorldClueBox.vue';
 import DiceOverlayLoader from '@/features/dice3d/components/DiceOverlayLoader.vue';
 import DiceSettingsDrawer from '@/features/dice3d/components/DiceSettingsDrawer.vue';
 import DiceDock from '@/features/dice3d/components/DiceDock.vue';
@@ -46,7 +49,10 @@ import { dice3dRuntime } from '@/features/dice3d/runtime';
 import { resolveDice3DPlaybackPayload } from '@/features/dice3d/playbackProfile';
 import type { Dice3DMemberProfile, Dice3DWorldConfig, DiceVisualPayload } from '@/types';
 import CharacterSheetManager from './components/character-sheet/CharacterSheetManager.vue';
+import TheaterFloatingReturnReceiver from './components/TheaterFloatingReturnReceiver.vue';
+import TheaterFloatingHost from '@/views/theater/host/TheaterFloatingHost.vue';
 import { useStickyNoteStore } from '@/stores/stickyNote';
+import { useWorldClueStore } from '@/stores/worldClue';
 import { useAudioStudioStore } from '@/stores/audioStudio';
 import { usePushNotificationStore } from '@/stores/pushNotification';
 import {
@@ -66,7 +72,12 @@ import RightClickMenu from './components/ChatRightClickMenu.vue'
 import AvatarClickMenu from './components/AvatarClickMenu.vue'
 import { nanoid } from 'nanoid';
 import { DEFAULT_PAGE_TITLE, useUtilsStore } from '@/stores/utils';
-import { useDisplayStore } from '@/stores/display';
+import {
+  FAVORITE_CHANNEL_LIMIT,
+  useDisplayStore,
+  type DisplaySettings,
+  type ToolbarHotkeyKey,
+} from '@/stores/display';
 import { normalizeMessageIcMode, resolveAvatarRenderState } from '@/stores/displayAvatarVisibility';
 import { useCharacterRemarkStore } from '@/stores/characterRemark';
 import { contentEscape, contentUnescape, arrayBufferToBase64, base64ToUint8Array } from '@/utils/tools'
@@ -85,11 +96,11 @@ import {
 import { useI18n } from 'vue-i18n';
 import { useAIStore } from '@/stores/ai';
 import { isTipTapJson, tiptapJsonToHtml, tiptapJsonToPlainText } from '@/utils/tiptap-render';
+import { isPrivateChatChannel } from '@/utils/channelSendPermission';
 import { resolveAttachmentUrl, fetchAttachmentMetaById, fetchAttachmentFileById, normalizeAttachmentId } from '@/composables/useAttachmentResolver';
 import { ensureDefaultDiceExpr, matchDiceExpressions, parseMultiDiceExpression, type DiceMatch } from '@/utils/dice';
 import { recordDiceHistory } from '@/views/chat/composables/useDiceHistory';
 import DOMPurify from 'dompurify';
-import type { DisplaySettings, ToolbarHotkeyKey } from '@/stores/display';
 import { INPUT_AREA_HEIGHT_LIMITS } from '@/stores/display';
 import { renderQuickFormatHtmlFromEscaped, restoreQuickFormatTextFromHtml, serializePlainTextFromDomNode } from '@/utils/plainQuickFormat';
 import { isSmartLinkNode, smartLinkToPlainText } from '@/utils/tiptapSmartLink';
@@ -99,6 +110,15 @@ import { buildOptimisticMessageIcModeFields } from '@/utils/optimisticMessageIcM
 import { normalizePunctuationForMessageSend } from '@/utils/punctuationNormalizer';
 import { buildGeneratedAvatarFile } from '@/utils/generatedAvatarImage';
 import { extractPushNotificationPreviewText } from '@/utils/pushNotificationPreview';
+import { navigateToMessageTarget } from '@/utils/messageJump';
+import {
+  hasExistingFavoriteChannels,
+  hasShownChannelFavoriteRecommendation,
+  markChannelFavoriteRecommendationShown,
+  markChannelFavoritesEverUsed,
+  readChannelFavoriteTipState,
+  recordWorldMessageToastJump,
+} from '@/utils/channelFavoriteTip';
 import { useIFormStore } from '@/stores/iform';
 import { useWorldGlossaryStore } from '@/stores/worldGlossary';
 import { useChannelSearchStore, type ChannelSearchResult } from '@/stores/channelSearch';
@@ -188,6 +208,14 @@ import {
 
 const EmojiPickerModal = defineAsyncComponent(() => import('./components/EmojiPickerModal.vue'));
 
+interface ChatProps {
+  hideComposer?: boolean;
+}
+
+const props = withDefaults(defineProps<ChatProps>(), {
+  hideComposer: false,
+});
+
 // const uploadImages = useObservable<Thumb[]>(
 //   liveQuery(() => db.thumbs.toArray()) as any
 // )
@@ -206,6 +234,8 @@ const channelImageLayout = useChannelImageLayoutStore();
 const onboarding = useOnboardingStore();
 const iFormStore = useIFormStore();
 const stickyNoteStore = useStickyNoteStore();
+const worldClueStore = useWorldClueStore();
+const worldClueBoxRef = ref<InstanceType<typeof WorldClueBox> | null>(null);
 const dice3dSettingsVisible = ref(false);
 const dice3dConfig = ref<Dice3DWorldConfig | null>(null);
 const dice3dProfile = ref<Dice3DMemberProfile | null>(null);
@@ -216,6 +246,15 @@ iFormStore.bootstrap();
 const router = useRouter();
 const route = useRoute();
 const pushStore = usePushNotificationStore();
+watch(
+  () => [display.settings.favoriteChannelBarEnabled, display.settings.favoriteChannelIdsByWorld] as const,
+  ([enabled, favoriteIdsByWorld]) => {
+    if (enabled || hasExistingFavoriteChannels(favoriteIdsByWorld)) {
+      markChannelFavoritesEverUsed();
+    }
+  },
+  { deep: true, immediate: true },
+);
 const isEditing = computed(() => !!chat.editing);
 const isEditingCurrentChannel = computed(() => {
   const channelId = String(chat.curChannel?.id || '').trim();
@@ -224,7 +263,69 @@ const isEditingCurrentChannel = computed(() => {
 
 const isEmbedMode = computed(() => route.path === '/embed');
 const isTheaterEmbedMode = computed(() => isEmbedMode.value && route.query.mode === 'theater');
+const isToolbarEmbedMode = computed(
+  () => isEmbedMode.value && route.query.toolbar === '1',
+);
+const isInlineSplitEmbedMode = computed(
+  () => isEmbedMode.value && route.query.inlineSplit === '1',
+);
 const splitEntryEnabled = computed(() => route.path !== '/embed');
+
+interface InlineChatSplitState extends InlineChatSplitOpenPayload {
+  paneId: string;
+  zIndex: number;
+  cascadeIndex: number;
+}
+
+const inlineChatSplits = ref<InlineChatSplitState[]>([]);
+let inlineChatSplitZIndex = 4100;
+let inlineChatSplitCascadeIndex = 0;
+
+const handleInlineChatSplitOpen = (payload: InlineChatSplitOpenPayload) => {
+  if (isEmbedMode.value) return;
+  const worldId = String(payload?.worldId || '').trim();
+  const channelId = String(payload?.channelId || '').trim();
+  if (!worldId || !channelId) return;
+  const cascadeIndex = inlineChatSplitCascadeIndex++;
+  inlineChatSplits.value.push({
+    worldId,
+    channelId,
+    forceOoc: payload.forceOoc === true,
+    title: payload.title?.trim() || '页内分屏',
+    paneId: `inline-chat-${nanoid(10)}`,
+    zIndex: ++inlineChatSplitZIndex,
+    cascadeIndex,
+  });
+};
+
+const openInlineIcOocSplit = () => {
+  const worldId = String(chat.currentWorldId || '').trim();
+  const channelId = String(chat.curChannel?.id || '').trim();
+  if (!worldId || !channelId) {
+    message.warning('请先进入频道');
+    return;
+  }
+  chat.setIcMode('ic', channelId);
+  if (chat.editing) chat.updateEditingIcMode('ic');
+  chat.autoSwitchRoleOnIcOocChange('ic');
+  chat.setFilterState({ icFilter: 'ic' });
+  chatEvent.emit('inline-chat-split-open', {
+    worldId,
+    channelId,
+    forceOoc: true,
+    title: chat.curChannel?.name?.trim() || '页内分屏',
+  });
+};
+
+const closeInlineChatSplit = (paneId: string) => {
+  inlineChatSplits.value = inlineChatSplits.value.filter(split => split.paneId !== paneId);
+};
+
+const focusInlineChatSplit = (paneId: string) => {
+  const split = inlineChatSplits.value.find(item => item.paneId === paneId);
+  if (!split) return;
+  split.zIndex = ++inlineChatSplitZIndex;
+};
 const routeWorldId = computed(() => typeof route.params.worldId === 'string' ? route.params.worldId.trim() : '');
 const theaterEntryEnabled = computed(() => {
   if (['/embed', '/split', '/theater'].includes(route.path)) return false;
@@ -365,7 +466,21 @@ const openIcOocSplitView = async (side: 'left' | 'right') => {
 };
 
 const toggleStickyNotes = () => {
-  stickyNoteStore.toggleVisible();
+  const next = !stickyNoteStore.uiVisible;
+  stickyNoteStore.setVisible(next);
+};
+
+const toggleWorldClueBox = () => {
+  const toggle = worldClueBoxRef.value?.toggleVisibility;
+  if (typeof toggle === 'function') {
+    toggle();
+    return;
+  }
+  worldClueStore.toggleVisible();
+};
+
+const openWorldClueBoard = () => {
+  worldClueBoxRef.value?.openBoard();
 };
 
 const openDice3DSettings = () => {
@@ -376,6 +491,12 @@ const canManageDice3DWorld = computed(() => {
   const worldId = String(chat.currentWorldId || '').trim();
   const role = worldId ? chat.worldDetailMap[worldId]?.memberRole : '';
   return role === 'owner' || role === 'admin' || Boolean(user.checkPerm?.('mod_admin'));
+});
+
+const canManageWorldClues = computed(() => {
+  const worldId = String(chat.currentWorldId || '').trim();
+  const role = worldId ? chat.worldDetailMap[worldId]?.memberRole : '';
+  return !chat.observerMode && (role === 'owner' || role === 'admin');
 });
 
 const refreshDice3DSettings = async () => {
@@ -481,7 +602,8 @@ type ExternalPanelKey =
   | 'world-glossary'
   | 'world-announcement'
   | 'character-card'
-  | 'sticky-note';
+  | 'sticky-note'
+  | 'clue-box';
 
 const openPanelForShell = (panel: ExternalPanelKey) => {
   switch (panel) {
@@ -504,7 +626,7 @@ const openPanelForShell = (panel: ExternalPanelKey) => {
       void openGalleryPanel();
       return;
     case 'display':
-      displaySettingsVisible.value = true;
+      openDisplaySettings('appearance');
       return;
     case 'dice3d':
       openDice3DSettings();
@@ -534,6 +656,9 @@ const openPanelForShell = (panel: ExternalPanelKey) => {
     case 'sticky-note':
       setStickyNoteVisible(true);
       return;
+    case 'clue-box':
+      setClueBoxVisible(true);
+      return;
     default:
       return;
   }
@@ -555,6 +680,10 @@ const setStickyNoteVisible = (visible: boolean) => {
   stickyNoteStore.setVisible(visible);
 };
 
+const setClueBoxVisible = (visible: boolean) => {
+  worldClueStore.setVisible(visible);
+};
+
 const setCharacterCardVisible = (visible: boolean) => {
   if (!visible) {
     characterCardPanelVisible.value = false;
@@ -564,6 +693,7 @@ const setCharacterCardVisible = (visible: boolean) => {
 };
 
 const getStickyNoteVisible = () => stickyNoteStore.uiVisible;
+const getClueBoxVisible = () => worldClueStore.uiVisible;
 
 const getCharacterCardVisible = () => characterCardPanelVisible.value;
 
@@ -843,8 +973,10 @@ defineExpose({
   setSearchPanelVisibleForShell,
   setFiltersForShell,
   setStickyNoteVisible,
+  setClueBoxVisible,
   setCharacterCardVisible,
   getStickyNoteVisible,
+  getClueBoxVisible,
   getCharacterCardVisible,
   sendMessageForTheater,
   insertComposerForTheater,
@@ -896,6 +1028,8 @@ const canManageWorldKeywords = computed(() => {
   return role === 'owner' || role === 'admin' || (allowMemberEdit && role === 'member')
 })
 const displaySettingsVisible = ref(false);
+type DisplaySettingsCategory = 'appearance' | 'reading' | 'input' | 'role' | 'terms' | 'notifications' | 'other';
+const displaySettingsInitialCategory = ref<DisplaySettingsCategory>('appearance');
 const characterRemarkManagerVisible = ref(false);
 const showWorldAnnouncementModal = ref(false);
 const compactInlineLayout = computed(() => display.layout === 'compact' && !display.showAvatar);
@@ -1033,26 +1167,6 @@ const diceModeTooltip = computed(() => {
 });
 const channelSendAllowed = ref(true);
 let sendPermissionSeq = 0;
-const isPrivateChatChannel = (channel?: SChannel | null) => {
-  if (!channel) {
-    return false;
-  }
-  if (channel.isPrivate) {
-    return true;
-  }
-  if (channel.friendInfo) {
-    return true;
-  }
-  const permType = typeof channel.permType === 'string' ? channel.permType.toLowerCase() : '';
-  if (permType === 'private') {
-    return true;
-  }
-  const typeValue = (channel as any)?.type;
-  if (typeof typeValue === 'number' && typeValue === 3) {
-    return true;
-  }
-  return false;
-};
 const isBotPrivateChatChannel = (channel?: SChannel | null) => {
   if (!isPrivateChatChannel(channel)) {
     return false;
@@ -1584,6 +1698,19 @@ const exportManagerRefreshVersion = ref(0);
 const exportManagerRevealVersion = ref(0);
 const battleReportDrawerVisible = ref(false);
 const channelFavoritesVisible = ref(false);
+const worldMessageToastStackRef = ref<{
+  enqueue: (payload: WorldMessageToastPayload) => void;
+  dismiss: (key: string) => void;
+  dismissAll: () => void;
+  dismissChannel: (worldId: string, channelId: string) => void;
+} | null>(null);
+const worldMessageNoticeTasks = new Map<string, Promise<void>>();
+interface ChannelFavoriteRecommendation {
+  worldId: string;
+  channelId: string;
+  channelName: string;
+}
+const channelFavoriteRecommendation = ref<ChannelFavoriteRecommendation | null>(null);
 const importDialogVisible = ref(false);
 const importProgressVisible = ref(false);
 const importJobId = ref('');
@@ -1767,9 +1894,14 @@ const handleActionRibbonStateRequest = () => {
   syncActionRibbonState();
 };
 
-const handleOpenDisplaySettings = () => {
+const openDisplaySettings = (category: DisplaySettingsCategory = 'appearance') => {
+  displaySettingsInitialCategory.value = category;
   showActionRibbon.value = true;
   displaySettingsVisible.value = true;
+};
+
+const handleOpenDisplaySettings = (payload?: { category?: DisplaySettingsCategory }) => {
+  openDisplaySettings(payload?.category || 'appearance');
 };
 
 const handleDisplaySettingsSave = (settings: Partial<DisplaySettings>) => {
@@ -1858,6 +1990,117 @@ const channelImagesPanelVisible = computed(() => channelImages.panelVisible);
 const message = useMessage()
 const dialog = useDialog()
 const { t } = useI18n();
+
+const maybeShowChannelFavoriteRecommendation = (
+  payload: WorldMessageToastPayload,
+  jumpCount: number,
+) => {
+  const worldId = String(payload.worldId || '').trim();
+  const channelId = String(payload.channelId || '').trim();
+  if (
+    jumpCount < 3
+    || !worldId
+    || !channelId
+    || String(chat.currentWorldId || '').trim() !== worldId
+    || String(chat.curChannel?.id || '').trim() !== channelId
+  ) {
+    return;
+  }
+
+  const favoriteIds = display.getFavoriteChannelIds(worldId);
+  if (favoriteIds.includes(channelId)) {
+    markChannelFavoritesEverUsed();
+    return;
+  }
+  const tipState = readChannelFavoriteTipState();
+  if (
+    tipState.everUsed
+    || hasExistingFavoriteChannels(display.settings.favoriteChannelIdsByWorld)
+    || hasShownChannelFavoriteRecommendation(worldId, channelId)
+  ) {
+    return;
+  }
+
+  markChannelFavoriteRecommendationShown(worldId, channelId);
+  channelFavoriteRecommendation.value = {
+    worldId,
+    channelId,
+    channelName: String(payload.channelName || chat.curChannel?.name || '当前频道').trim() || '当前频道',
+  };
+};
+
+const handleWorldMessageToastSelect = async (payload: WorldMessageToastPayload) => {
+  try {
+    const jumped = await navigateToMessageTarget(chat, payload);
+    if (!jumped) {
+      return;
+    }
+    const jumpCount = recordWorldMessageToastJump(payload.worldId, payload.channelId);
+    maybeShowChannelFavoriteRecommendation(payload, jumpCount);
+  } catch (error: any) {
+    message.error(error?.message || '无法定位消息');
+  }
+};
+
+const dismissChannelFavoriteRecommendation = () => {
+  channelFavoriteRecommendation.value = null;
+};
+
+const channelFavoriteRecommendationAtLimit = computed(() => {
+  const recommendation = channelFavoriteRecommendation.value;
+  if (!recommendation) {
+    return false;
+  }
+  return display.getFavoriteChannelIds(recommendation.worldId).length >= FAVORITE_CHANNEL_LIMIT;
+});
+
+const handleChannelFavoriteRecommendationAction = () => {
+  const recommendation = channelFavoriteRecommendation.value;
+  if (!recommendation) {
+    return;
+  }
+  if (channelFavoriteRecommendationAtLimit.value) {
+    channelFavoritesVisible.value = true;
+    dismissChannelFavoriteRecommendation();
+    return;
+  }
+  display.addFavoriteChannel(recommendation.channelId, recommendation.worldId);
+  markChannelFavoritesEverUsed();
+  dismissChannelFavoriteRecommendation();
+};
+
+watch(
+  () => [chat.currentWorldId, chat.curChannel?.id] as const,
+  ([worldId, channelId]) => {
+    const recommendation = channelFavoriteRecommendation.value;
+    if (!recommendation) {
+      return;
+    }
+    if (String(worldId || '').trim() !== recommendation.worldId || String(channelId || '').trim() !== recommendation.channelId) {
+      dismissChannelFavoriteRecommendation();
+    }
+  },
+);
+
+watch(
+  () => [chat.currentWorldId, chat.curChannel?.id] as const,
+  ([worldId, channelId], [previousWorldId]) => {
+    if (worldId !== previousWorldId) {
+      worldMessageToastStackRef.value?.dismissAll();
+      return;
+    }
+    if (worldId && channelId) {
+      worldMessageToastStackRef.value?.dismissChannel(worldId, channelId);
+    }
+  },
+);
+
+watch(() => display.settings.worldMessageToastEnabled, (enabled) => {
+  if (!enabled) {
+    worldMessageToastStackRef.value?.dismissAll();
+  }
+});
+
 const {
   emojiLoading,
   emojiItems,
@@ -3292,7 +3535,7 @@ const identityFolderMembership = computed<Record<string, string[]>>(() => (
 ));
 const isEditingTemporaryIdentity = computed(() => identityDialogMode.value === 'edit' && Boolean(editingIdentity.value?.isTemporary));
 const isDelegatedSharedIdentity = computed(() => (
-  isManagingOtherUserIdentity.value && Boolean(editingIdentity.value?.sharedIdentityId)
+  isManagingOtherUserIdentity.value && !isManagingBotIdentity.value && Boolean(editingIdentity.value?.sharedIdentityId)
 ));
 const sharedSynchronizedFieldsDisabled = computed(() => botBaseAppearanceInherited.value || isDelegatedSharedIdentity.value);
 const canPromoteEditingIdentityToShared = computed(() => (
@@ -5198,7 +5441,7 @@ const ensureTheaterModeForAppearanceEdit = async (mode: 'base' | 'variant') => {
 const openIdentityTheaterPresentationEditor = async () => {
   if (isDelegatedSharedIdentity.value) return;
   if (!(await ensureTheaterModeForAppearanceEdit('base'))) return;
-  if (editingIdentity.value?.sharedIdentityId && editingIdentity.value.id && chat.curChannel?.id) {
+  if (editingIdentity.value?.sharedIdentityId && !isManagingBotIdentity.value && editingIdentity.value.id && chat.curChannel?.id) {
     try {
       await chat.loadChannelIdentities(chat.curChannel.id, true, currentIdentityTargetUserId.value);
       const refreshed = chat.getScopedChannelIdentities(chat.curChannel.id, currentIdentityTargetUserId.value)
@@ -5251,7 +5494,7 @@ const handleTheaterPresentationApply = async (value: TheaterPresentation | Theat
     } else {
       const submittedPresentation = cloneChannelIdentityTheaterPresentation(value as TheaterPresentation);
       identityForm.theaterPresentation = submittedPresentation;
-      if (editingIdentity.value?.sharedIdentityId && editingIdentity.value.id && chat.curChannel?.id) {
+      if (editingIdentity.value?.sharedIdentityId && !isManagingBotIdentity.value && editingIdentity.value.id && chat.curChannel?.id) {
         try {
           const savedIdentity = await chat.sharedChannelIdentityTheaterPresentationSet(editingIdentity.value.id, {
             channelId: chat.curChannel.id,
@@ -5859,7 +6102,7 @@ const submitIdentityForm = async (options: { closeDialog?: boolean; successMessa
     avatarAttachmentId: identityForm.avatarAttachmentId,
     avatarDecorations: cloneAvatarDecorations(identityForm.avatarDecorations)
       .filter(item => item.resourceAttachmentId),
-    theaterPresentation: editingIdentity.value?.sharedIdentityId
+    theaterPresentation: editingIdentity.value?.sharedIdentityId && !isManagingBotIdentity.value
       ? undefined
       : identityForm.theaterPresentation
         ? cloneChannelIdentityTheaterPresentation(identityForm.theaterPresentation)
@@ -6454,6 +6697,7 @@ const handleExportMessages = async (params: {
   includeImages: boolean;
   removeDiceCommands: boolean;
   withoutTimestamp: boolean;
+  withoutOocParentheses: boolean;
   mergeMessages: boolean;
   autoCorrectPunctuation: boolean;
   textColorizeBBCode: boolean;
@@ -6493,6 +6737,7 @@ const handleExportMessages = async (params: {
       includeImages: params.includeImages,
       includeDiceCommands: !params.removeDiceCommands,
       withoutTimestamp: params.withoutTimestamp,
+      withoutOocParentheses: params.withoutOocParentheses,
       mergeMessages: params.mergeMessages,
       autoCorrectPunctuation: params.autoCorrectPunctuation,
       textColorizeBBCode: params.textColorizeBBCode && params.format === 'txt',
@@ -10851,6 +11096,12 @@ const insertComposerText = (content: string) => {
   });
 };
 
+const handleWorldClueInsertLink = (payload?: { link?: string }) => {
+  const link = String(payload?.link || '').trim();
+  if (link) insertComposerText(link);
+};
+chatEvent.on('world-clue-insert-link' as any, handleWorldClueInsertLink as any);
+
 const moveInputCursorToEnd = () => {
   if (textInputRef.value?.moveCursorToEnd) {
     textInputRef.value.moveCursorToEnd();
@@ -13142,6 +13393,7 @@ function handleOpenBattleSummaryEvent() {
 }
 
 onMounted(async () => {
+  chatEvent.on('inline-chat-split-open', handleInlineChatSplitOpen);
   chatEvent.on('open-battle-summary' as any, handleOpenBattleSummaryEvent as any);
   await chat.tryInit();
   draftOwnerChannelKey.value = currentChannelKey.value;
@@ -13225,6 +13477,190 @@ const handleMessageRemoved = (e?: Event) => {
     }
   };
 
+const enqueueWorldMessageToast = (incoming: Message, event?: any) => {
+  const incomingChannelId = String(
+    event?.channel?.id
+      || (incoming as any)?.channel?.id
+      || (incoming as any)?.channel_id
+      || '',
+  ).trim();
+  const currentChannelId = String(chat.curChannel?.id || '').trim();
+  const currentWorldId = String(chat.currentWorldId || routeWorldId.value || (chat.curChannel as any)?.worldId || '').trim();
+  if (!display.settings.worldMessageToastEnabled || !currentWorldId || !incomingChannelId || incomingChannelId === currentChannelId) {
+    return;
+  }
+
+  const eventChannel = event?.channel || (incoming as any)?.channel || null;
+  const knownChannel = chat.findChannelById(incomingChannelId) as any;
+  const incomingWorldId = String(
+    event?.worldId
+      || event?.world_id
+      || eventChannel?.worldId
+      || eventChannel?.world_id
+      || knownChannel?.worldId
+      || knownChannel?.world_id
+      || event?.message?.worldId
+      || event?.message?.world_id
+      || (incoming as any)?.worldId
+      || (incoming as any)?.world_id
+      || event?.guild?.id
+      || (incoming as any)?.guild?.id
+      || '',
+  ).trim();
+  if (!incomingWorldId || incomingWorldId !== currentWorldId) {
+    return;
+  }
+
+  const currentUserId = String(user.info.id || '').trim();
+  const incomingSenderId = String(getMessageAuthorId(incoming) || event?.user?.id || '').trim();
+  if ((!!currentUserId && incomingSenderId === currentUserId) || !incoming.id) {
+    return;
+  }
+
+  const speakerName = String(
+    (incoming as any)?.identity?.displayName
+      || (incoming as any)?.sender_identity_name
+      || (incoming as any)?.senderIdentityName
+      || (incoming as any)?.sender_member_name
+      || incoming.member?.nick
+      || incoming.user?.nick
+      || incoming.user?.name
+      || '未知',
+  ).trim() || '未知';
+  const channelName = String(eventChannel?.name || knownChannel?.name || (incoming as any)?.channel?.name || '未知频道').trim() || '未知频道';
+  const preview = extractPushNotificationPreviewText(incoming.content || '');
+  const createdAt = normalizeTimestamp(incoming.createdAt)
+    ?? normalizeTimestamp(event?.timestamp)
+    ?? Date.now();
+  worldMessageToastStackRef.value?.enqueue({
+    worldId: currentWorldId,
+    channelId: incomingChannelId,
+    messageId: String(incoming.id),
+    channelName,
+    speakerName,
+    preview,
+    createdAt,
+  });
+};
+
+const handleMessageCreatedNotice = (event?: any) => {
+  const channelId = String(
+    event?.channel?.id || event?.channelId || event?.channel_id || '',
+  ).trim();
+  const messageId = String(
+    event?.message?.id
+      || event?.message?.messageId
+      || event?.message?.message_id
+      || event?.messageId
+      || event?.message_id
+      || '',
+  ).trim();
+  const currentWorldId = String(chat.currentWorldId || routeWorldId.value || (chat.curChannel as any)?.worldId || '').trim();
+  const currentChannelId = String(chat.curChannel?.id || '').trim();
+  if (!channelId || !currentWorldId || channelId === currentChannelId || !display.settings.worldMessageToastEnabled) {
+    return;
+  }
+
+  const taskKey = `${channelId}:${messageId || 'latest'}`;
+  if (worldMessageNoticeTasks.has(taskKey)) {
+    return;
+  }
+  const task = (async () => {
+    let channel = chat.findChannelById(channelId) as any;
+    let channelWorldId = String(
+      event?.worldId
+        || event?.world_id
+        || event?.channel?.worldId
+        || event?.channel?.world_id
+        || event?.message?.channel?.worldId
+        || event?.message?.channel?.world_id
+        || event?.message?.worldId
+        || event?.message?.world_id
+        || channel?.worldId
+        || channel?.world_id
+        || '',
+    ).trim();
+    if (!channelWorldId && typeof chat.channelInfoGet === 'function') {
+      try {
+        const response = await chat.channelInfoGet(channelId);
+        channel = response?.item || channel;
+        channelWorldId = String(channel?.worldId || channel?.world_id || '').trim();
+      } catch {
+        channelWorldId = '';
+      }
+    }
+    if (!channelWorldId || channelWorldId !== currentWorldId) {
+      return;
+    }
+
+    const activeWorldId = String(chat.currentWorldId || routeWorldId.value || (chat.curChannel as any)?.worldId || '').trim();
+    if (currentWorldId !== activeWorldId) {
+      return;
+    }
+
+    const noticeMessage = event?.message;
+    if (noticeMessage && typeof noticeMessage === 'object') {
+      const incoming = normalizeMessageShape(noticeMessage);
+      if (!incoming.id && messageId) {
+        incoming.id = messageId;
+      }
+      if (incoming.id) {
+        enqueueWorldMessageToast(incoming, {
+          ...event,
+          channel: event?.channel || channel,
+        });
+        return;
+      }
+    }
+
+    let rawMessage: any = null;
+    if (messageId) {
+      try {
+        const context = await chat.messageContext(channelId, messageId, {
+          before: 1,
+          after: 1,
+          includeArchived: true,
+          includeOoc: true,
+        });
+        const contextItems = Array.isArray(context?.data)
+          ? context.data
+          : (Array.isArray((context?.data as any)?.data) ? (context?.data as any).data : []);
+        rawMessage = contextItems.find((item: any) => String(item?.id || item?.message_id || item?.messageId || '').trim() === messageId) || null;
+      } catch {
+        rawMessage = null;
+      }
+    } else {
+      // Older servers omit messageId from notice. Time-mode list avoids marking channel read.
+      try {
+        const response = await chat.messageList(channelId, undefined, {
+          limit: 1,
+          fromTime: 1,
+          includeArchived: true,
+          includeOoc: true,
+        });
+        const items = Array.isArray(response?.data) ? response.data : [];
+        rawMessage = items.length > 0 ? items[items.length - 1] : null;
+      } catch {
+        rawMessage = null;
+      }
+    }
+    if (!rawMessage) {
+      return;
+    }
+    const incoming = normalizeMessageShape(rawMessage);
+    if (messageId && String(incoming.id || '').trim() !== messageId) {
+      return;
+    }
+    enqueueWorldMessageToast(incoming, {
+      ...event,
+      channel: event?.channel || channel,
+    });
+  })().catch(() => undefined).finally(() => {
+    worldMessageNoticeTasks.delete(taskKey);
+  });
+  worldMessageNoticeTasks.set(taskKey, task);
+};
+
 const handleMessageCreated = (e?: Event) => {
   if (!e?.message) {
     return;
@@ -13244,12 +13680,13 @@ const handleMessageCreated = (e?: Event) => {
 			dice3dRuntime.play(payload);
 		}
 	}
-  const isSelf = incoming.user?.id === user.info.id;
-  const content = incoming.content || '';
-  const currentUserId = user.info.id;
-  const mentionIds = !isSelf ? collectMentionIdsFromContent(content) : new Set<string>();
-  const isMentioned = !isSelf && (mentionIds.has(currentUserId) || mentionIds.has('all'));
-  if (!isCurrentChannelMessage) {
+	const isSelf = incoming.user?.id === user.info.id;
+	const content = incoming.content || '';
+	const currentUserId = String(user.info.id || '').trim();
+	const mentionIds = !isSelf ? collectMentionIdsFromContent(content) : new Set<string>();
+	const isMentioned = !isSelf && (mentionIds.has(currentUserId) || mentionIds.has('all'));
+	enqueueWorldMessageToast(incoming, e);
+	if (!isCurrentChannelMessage) {
     if (incomingChannelId && isMentioned) {
       chat.setChannelMentionState(incomingChannelId, true);
     }
@@ -13433,6 +13870,7 @@ const handleMessageUpdated = (e?: Event) => {
 
 const chatViewMessageHandlers = {
   created: handleMessageCreated,
+  notice: handleMessageCreatedNotice,
   updated: handleMessageUpdated,
   removed: handleMessageRemoved,
 };
@@ -13443,16 +13881,21 @@ const chatEventWithMessageOwner = chatEvent as typeof chatEvent & {
 const previousChatViewMessageHandlers = chatEventWithMessageOwner.__chatViewMessageHandlers;
 if (previousChatViewMessageHandlers) {
   chatEvent.off('message-created', previousChatViewMessageHandlers.created);
+  if (previousChatViewMessageHandlers.notice) {
+    chatEvent.off('message-created-notice', previousChatViewMessageHandlers.notice);
+  }
   chatEvent.off('message-updated', previousChatViewMessageHandlers.updated);
   chatEvent.off('message-removed', previousChatViewMessageHandlers.removed);
 }
 chatEventWithMessageOwner.__chatViewMessageHandlers = chatViewMessageHandlers;
 chatEvent.on('message-created', chatViewMessageHandlers.created);
+chatEvent.on('message-created-notice', chatViewMessageHandlers.notice);
 chatEvent.on('message-updated', chatViewMessageHandlers.updated);
 chatEvent.on('message-removed', chatViewMessageHandlers.removed);
 disposeChatMessageHandlers = () => {
   if (chatEventWithMessageOwner.__chatViewMessageHandlers !== chatViewMessageHandlers) return;
   chatEvent.off('message-created', chatViewMessageHandlers.created);
+  chatEvent.off('message-created-notice', chatViewMessageHandlers.notice);
   chatEvent.off('message-updated', chatViewMessageHandlers.updated);
   chatEvent.off('message-removed', chatViewMessageHandlers.removed);
   delete chatEventWithMessageOwner.__chatViewMessageHandlers;
@@ -14698,6 +15141,7 @@ onBeforeUnmount(() => {
   chatEvent.off('action-ribbon-toggle', handleActionRibbonToggleRequest);
   chatEvent.off('action-ribbon-state-request', handleActionRibbonStateRequest);
   chatEvent.off('open-display-settings', handleOpenDisplaySettings);
+  chatEvent.off('inline-chat-split-open', handleInlineChatSplitOpen);
   chatEvent.off('channel-context-cleared', handleChannelContextCleared as any);
   chatEvent.off('channel-switch-to', handleChannelSwitchEvent as any);
   chatEvent.off('battle-report-display-refresh' as any, handleBattleReportDisplayRefresh as any);
@@ -14705,6 +15149,7 @@ onBeforeUnmount(() => {
   chatEvent.off('open-battle-summary' as any, handleOpenBattleSummaryEvent as any);
   chatEvent.off('world-dice3d-updated' as any, handleDice3DSettingsUpdated as any);
   chatEvent.off('world-member-dice3d-updated' as any, handleDice3DSettingsUpdated as any);
+  chatEvent.off('world-clue-insert-link' as any, handleWorldClueInsertLink as any);
   revokeIdentityObjectURL();
   revokeIdentityVariantObjectURL();
   searchHighlightTimers.forEach((timer) => window.clearTimeout(timer));
@@ -14719,13 +15164,19 @@ onBeforeUnmount(() => {
     ref="chatRootContainerRef"
     class="flex flex-col h-full justify-between chat-root-container"
     :class="{ 'chat-root-container--embed': isEmbedMode }"
+    :data-rich-message-world-id="chat.currentWorldId || undefined"
+    :data-rich-message-channel-id="chat.curChannel?.id || undefined"
   >
     <!-- 频道背景层 -->
     <div v-if="channelBackgroundStyle" class="channel-background-layer" :style="channelBackgroundStyle"></div>
     <div v-if="channelBackgroundOverlayStyle" class="channel-background-overlay" :style="channelBackgroundOverlayStyle"></div>
+    <WorldMessageToastStack
+      ref="worldMessageToastStackRef"
+      @select="handleWorldMessageToastSelect"
+    />
     <!-- 功能面板 -->
     <transition name="slide-down">
-      <div v-if="showActionRibbon && (!isEmbedMode || isTheaterEmbedMode)" class="chat-top-toolbar-stack">
+      <div v-if="showActionRibbon && (!isEmbedMode || isTheaterEmbedMode || isToolbarEmbedMode || isInlineSplitEmbedMode)" class="chat-top-toolbar-stack">
         <ChatActionRibbon
           :filters="chat.filterState"
           :roles="ribbonRoleOptions"
@@ -14749,6 +15200,10 @@ onBeforeUnmount(() => {
           :ic-ooc-split-active="false"
           :sticky-note-enabled="true"
           :sticky-note-active="stickyNoteStore.uiVisible"
+          :clue-box-enabled="!chat.observerMode && !!chat.currentWorldId"
+          :clue-box-active="worldClueStore.uiVisible"
+          :clue-box-attention="worldClueStore.unreadCount > 0"
+		  :clue-board-enabled="!chat.observerMode && !!chat.currentWorldId && !!chat.curChannel?.id"
 		  :dice3d-enabled="!chat.observerMode"
 		  :dice3d-active="dice3dSettingsVisible"
           :webhook-enabled="webhookManageAllowed"
@@ -14764,7 +15219,7 @@ onBeforeUnmount(() => {
           @open-import="importDialogVisible = true"
           @open-identity-manager="openIdentityManager"
           @open-gallery="openGalleryPanel"
-          @open-display-settings="displaySettingsVisible = true"
+          @open-display-settings="openDisplaySettings('appearance')"
           @open-favorites="channelFavoritesVisible = true"
           @open-character-remark="characterRemarkManagerVisible = true"
           @open-channel-images="openChannelImagesPanel"
@@ -14772,7 +15227,10 @@ onBeforeUnmount(() => {
           @open-split="openSplitView"
           @open-theater="openTheaterView"
           @open-ic-ooc-split="openIcOocSplitView"
+          @open-inline-chat-split="openInlineIcOocSplit"
           @toggle-sticky-note="toggleStickyNotes"
+          @toggle-clue-box="toggleWorldClueBox"
+		  @open-clue-board="openWorldClueBoard"
 		  @open-dice3d="openDice3DSettings"
           @open-webhook="webhookDrawerVisible = true"
           @open-bridge-status="bridgeStatusDrawerVisible = true"
@@ -15322,6 +15780,35 @@ onBeforeUnmount(() => {
       <ChannelFavoriteBar @manage="channelFavoritesVisible = true" />
     </div>
 
+    <Transition name="channel-favorite-recommendation">
+      <div
+        v-if="channelFavoriteRecommendation"
+        class="channel-favorite-recommendation mx-4"
+        role="status"
+      >
+        <div class="channel-favorite-recommendation__copy">
+          <strong>经常查看这个频道？</strong>
+          <span>{{ channelFavoriteRecommendation.channelName }}收藏后可以快速切换。</span>
+        </div>
+        <div class="channel-favorite-recommendation__actions">
+          <button
+            type="button"
+            class="channel-favorite-recommendation__primary"
+            @click="handleChannelFavoriteRecommendationAction"
+          >
+            {{ channelFavoriteRecommendationAtLimit ? '管理收藏' : '收藏频道' }}
+          </button>
+          <button
+            type="button"
+            class="channel-favorite-recommendation__dismiss"
+            @click="dismissChannelFavoriteRecommendation"
+          >
+            不再提示
+          </button>
+        </div>
+      </div>
+    </Transition>
+
     <IFormEmbedInstances />
     <IFormPanelHost />
 
@@ -15739,7 +16226,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div class="chat-input-wrapper flex flex-col w-full relative">
+      <div v-show="!props.hideComposer" class="chat-input-wrapper flex flex-col w-full relative">
         <transition name="fade">
           <div v-if="whisperPanelVisible" class="whisper-panel" @mousedown.stop @pointerdown.stop>
             <div class="whisper-panel__title">
@@ -16737,9 +17224,9 @@ onBeforeUnmount(() => {
             @update:value="identityForm.botAppearanceMode = $event ? 'inherit' : 'custom'"
           >
             <template #checked>跟随 BOT 全局资料</template>
-            <template #unchecked>使用频道自定义资料</template>
+            <template #unchecked>使用自定义资料</template>
           </n-switch>
-          <n-text depth="3">仅控制昵称、颜色、头像；头像装饰与小剧场演出始终按当前频道保存。</n-text>
+          <n-text depth="3">BOT 角色设置会在当前世界的所有频道同步；“跟随”仅控制昵称、颜色、头像来源。</n-text>
         </div>
       </n-form-item>
       <n-form-item label="频道昵称">
@@ -17742,11 +18229,26 @@ onBeforeUnmount(() => {
     </template>
   </DiceTrayFloatingWindow>
   <IFormFloatingWindows />
+  <InlineChatSplitWindow
+    v-for="split in inlineChatSplits"
+    :key="split.paneId"
+    :world-id="split.worldId"
+    :channel-id="split.channelId"
+    :pane-id="split.paneId"
+    :title="split.title"
+    :persist-layout="split.paneId === inlineChatSplits[0]?.paneId"
+    :force-ooc="split.forceOoc === true"
+    :z-index="split.zIndex"
+    :cascade-index="split.cascadeIndex"
+    @close="closeInlineChatSplit(split.paneId)"
+    @focus="focusInlineChatSplit(split.paneId)"
+  />
   <IFormDrawer />
 
   <DisplaySettingsModal
     v-model:visible="displaySettingsVisible"
     :settings="display.settings"
+    :initial-category="displaySettingsInitialCategory"
     @save="handleDisplaySettingsSave"
   />
 
@@ -17777,6 +18279,13 @@ onBeforeUnmount(() => {
     v-if="chat.curChannel?.id"
     :channel-id="chat.curChannel.id"
   />
+  <WorldClueBox
+    ref="worldClueBoxRef"
+    v-if="chat.curChannel?.id && chat.currentWorldId && !chat.observerMode"
+    :world-id="chat.currentWorldId"
+    :channel-id="chat.curChannel.id"
+    :can-manage="canManageWorldClues"
+  />
 
 	<DiceOverlayLoader v-if="!isTheaterEmbedMode && display.settings.dice3dEnabled" :surface-element="messagesListRef" />
 	<DiceDock
@@ -17798,6 +18307,14 @@ onBeforeUnmount(() => {
 
   <!-- 人物卡预览窗口 -->
   <CharacterSheetManager />
+  <TheaterFloatingReturnReceiver />
+  <TheaterFloatingHost
+    v-if="chat.curChannel?.id && chat.currentWorldId"
+    host-mode="viewport"
+    :chat-frame="null"
+    :world-id="chat.currentWorldId"
+    :channel-id="chat.curChannel.id"
+  />
 </template>
 
 <style lang="scss" scoped src="./styles/chat.scoped.scss"></style>

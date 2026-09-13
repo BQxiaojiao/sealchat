@@ -57,6 +57,7 @@ type TheaterSceneModel struct {
 	SortOrder     int64  `json:"sortOrder" gorm:"not null;index:idx_theater_scene_room_sort,priority:2"`
 	FolderID      string `json:"folderId,omitempty" gorm:"size:100;index"`
 	Locked        bool   `json:"locked" gorm:"not null;default:false"`
+	Published     bool   `json:"published" gorm:"not null;default:false"`
 	StateJSON     string `json:"stateJson" gorm:"not null"`
 	SchemaVersion int    `json:"schemaVersion" gorm:"not null"`
 	CreatedBy     string `json:"createdBy" gorm:"size:100;index"`
@@ -163,6 +164,22 @@ type TheaterPanelFolderStateModel struct {
 }
 
 func (*TheaterPanelFolderStateModel) TableName() string { return "theater_panel_folder_states" }
+
+// TheaterSceneOverlayPresetModel stores user-created scene overlay presets.
+// Overlay entries intentionally omit runtime binding IDs.
+type TheaterSceneOverlayPresetModel struct {
+	StringPKBaseModel
+	RoomID       string `json:"roomId" gorm:"size:100;not null;uniqueIndex:udx_theater_scene_overlay_preset_name,priority:1;index:idx_theater_scene_overlay_preset_room_updated"`
+	Name         string `json:"name" gorm:"size:128;not null;uniqueIndex:udx_theater_scene_overlay_preset_name,priority:2"`
+	Description  string `json:"description" gorm:"size:512;not null;default:''"`
+	TagsJSON     string `json:"-" gorm:"type:text;not null"`
+	OverlaysJSON string `json:"-" gorm:"type:text;not null"`
+	Revision     int64  `json:"revision" gorm:"not null;default:1"`
+	CreatedBy    string `json:"createdBy" gorm:"size:100;index"`
+	UpdatedBy    string `json:"updatedBy" gorm:"size:100"`
+}
+
+func (*TheaterSceneOverlayPresetModel) TableName() string { return "theater_scene_overlay_presets" }
 
 type TheaterImageAssetModel struct {
 	StringPKBaseModel
@@ -316,6 +333,7 @@ func theaterModels() []any {
 		&TheaterPanelFolderModel{},
 		&TheaterPanelItemModel{},
 		&TheaterPanelFolderStateModel{},
+		&TheaterSceneOverlayPresetModel{},
 		&TheaterImageAssetModel{},
 		&TheaterResourceModel{},
 		&TheaterResourceVariantModel{},

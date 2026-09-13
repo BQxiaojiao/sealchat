@@ -5,6 +5,7 @@ import type {
   AdminAIQuotaDetail,
   AdminAIQuotaListResult,
   AdminAIUsageLogListResult,
+  AdminUserDetailResponse,
   AdminUpdateJob,
   AdminUpdateOverview,
   BotOneBotConfig,
@@ -298,6 +299,15 @@ export const useUtilsStore = defineStore({
       const resp = await api.get('api/v1/admin/user-list', {
         headers: { 'Authorization': user.token },
         params: params
+      })
+      return resp
+    },
+
+    async adminUserDetail(userId: string) {
+      const user = useUserStore();
+      const resp = await api.get<AdminUserDetailResponse>('api/v1/admin/user-detail', {
+        headers: { 'Authorization': user.token },
+        params: { id: userId },
       })
       return resp
     },
@@ -644,9 +654,9 @@ export const useUtilsStore = defineStore({
       return resp
     },
 
-    async adminBackupDelete(filename: string) {
+    async adminBackupDelete(filename: string, storage: 'local' | 's3') {
       const user = useUserStore();
-      const resp = await api.post('api/v1/admin/backup/delete', { filename }, {
+      const resp = await api.post('api/v1/admin/backup/delete', { filename, storage }, {
         headers: { 'Authorization': user.token }
       })
       return resp

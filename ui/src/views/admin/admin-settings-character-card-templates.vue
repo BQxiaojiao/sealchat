@@ -3,6 +3,7 @@ import dayjs from 'dayjs'
 import { h, onMounted, reactive, ref } from 'vue'
 import { NButton, NSpace, useDialog, useMessage } from 'naive-ui'
 import { api } from '@/stores/_config'
+import { readHtmlFile } from '@/utils/htmlFile'
 
 interface TemplateItem {
   id: string
@@ -26,6 +27,7 @@ const items = ref<TemplateItem[]>([])
 const page = ref(1)
 const pageSize = ref(100)
 const total = ref(0)
+const templateHtmlFileInputRef = ref<HTMLInputElement | null>(null)
 const form = reactive({
   name: '', sheetType: '', content: '', enabled: true,
   badgeOverrideEnabled: false, badgeTemplateOverride: '',
@@ -73,6 +75,26 @@ const changePage = (nextPage: number) => {
 }
 
 const openCreate = () => { reset(); modalVisible.value = true }
+
+const triggerTemplateHtmlUpload = () => {
+  if (!templateHtmlFileInputRef.value) return
+  templateHtmlFileInputRef.value.value = ''
+  templateHtmlFileInputRef.value.click()
+}
+
+const handleTemplateHtmlUpload = async (event: Event) => {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  try {
+    form.content = await readHtmlFile(file)
+    message.success('HTML 文件已读取')
+  } catch (error: any) {
+    message.error(error?.message || '读取 HTML 文件失败')
+  }
+}
+
 const openEdit = async (row: TemplateItem) => {
   reset()
   try {
@@ -156,7 +178,19 @@ onMounted(load)
       <n-form label-placement="left" label-width="150">
         <n-form-item label="名称"><n-input v-model:value="form.name" /></n-form-item>
         <n-form-item label="规则类型"><n-input v-model:value="form.sheetType" /></n-form-item>
-        <n-form-item label="人物卡模板 Content"><n-input v-model:value="form.content" type="textarea" :rows="12" /></n-form-item>
+        <n-form-item label="人物卡模板 Content">
+          <n-space vertical size="small" style="width: 100%;">
+            <input
+              ref="templateHtmlFileInputRef"
+              type="file"
+              accept=".html,.htm,text/html"
+              hidden
+              @change="handleTemplateHtmlUpload"
+            />
+            <n-button size="small" secondary @click="triggerTemplateHtmlUpload">上传HTML文件</n-button>
+            <n-input v-model:value="form.content" type="textarea" :rows="12" />
+          </n-space>
+        </n-form-item>
         <n-form-item label="覆盖频道角色徽标">
           <n-space vertical style="width: 100%"><n-switch v-model:value="form.badgeOverrideEnabled" /><n-input v-if="form.badgeOverrideEnabled" v-model:value="form.badgeTemplateOverride" type="textarea" :rows="3" /></n-space>
         </n-form-item>

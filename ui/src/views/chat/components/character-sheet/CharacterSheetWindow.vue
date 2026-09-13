@@ -3,7 +3,7 @@
     v-if="windowData && !windowData.isMinimized"
     ref="windowEl"
     class="character-sheet-window"
-    :class="{ 'is-flipped': windowData.mode === 'edit', 'is-mobile': isMobile }"
+    :class="{ 'is-flipped': windowData.mode === 'edit', 'is-mobile': isMobile, 'is-standalone': standalone }"
     :style="windowStyle"
     @pointerdown="handlePointerDown"
   >
@@ -14,7 +14,7 @@
     >
       <div class="sheet-window__title">
         <button
-          v-if="isMobile"
+          v-if="isMobile && !standalone"
           class="sheet-window__mobile-back"
           title="关闭"
           @click="handleMobileBack"
@@ -28,6 +28,23 @@
       </div>
       <div class="sheet-window__controls">
         <button
+          class="sheet-window__control-btn"
+          title="弹出"
+          aria-label="弹出"
+          @click="popoutInternalSurface"
+          @pointerdown.stop
+        >
+          <n-icon :component="ExternalLink" :size="14" />
+        </button>
+        <button
+          class="sheet-window__control-btn"
+          title="复制外部链接"
+          @click="copyInternalSurfaceLink"
+          @pointerdown.stop
+        >
+          <n-icon :component="Copy" :size="14" />
+        </button>
+        <button
           v-if="!windowData.readOnly"
           class="sheet-window__control-btn"
           :title="windowData.mode === 'view' ? '编辑' : '预览'"
@@ -37,6 +54,7 @@
           <n-icon :component="windowData.mode === 'view' ? Edit : Eye" :size="14" />
         </button>
         <button
+          v-if="!standalone"
           class="sheet-window__control-btn"
           :class="{ 'sheet-window__control-btn--mobile-text': isMobile }"
           title="最小化"
@@ -47,7 +65,7 @@
           <span v-if="isMobile" class="sheet-window__control-text">最小化</span>
         </button>
         <button
-          v-if="!isMobile"
+          v-if="!isMobile && !standalone"
           class="sheet-window__control-btn sheet-window__control-btn--close"
           title="关闭"
           @click="sheetStore.closeSheet(windowId)"
@@ -147,7 +165,7 @@
     </div>
 
     <div
-      v-if="!isMobile"
+      v-if="!isMobile && !standalone"
       class="sheet-window__resize-handle"
       @pointerdown="startResize"
     />
@@ -158,18 +176,29 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { NIcon, NTabs, NTabPane, NInput, NButton, NSelect, useMessage } from 'naive-ui';
 import { Close, Remove as Minus, Create as Edit, Eye, ChevronBack } from '@vicons/ionicons5';
-import { User } from '@vicons/tabler';
+import { Copy, ExternalLink, User } from '@vicons/tabler';
 import { useChatStore } from '@/stores/chat';
+import { useUtilsStore } from '@/stores/utils';
 import { useCharacterSheetStore } from '@/stores/characterSheet';
 import { useCharacterCardTemplateStore, type CharacterCardTemplateMode } from '@/stores/characterCardTemplate';
 import { resolveAttachmentUrl } from '@/composables/useAttachmentResolver';
 import IframeSandbox, { type SealChatEvent } from './IframeSandbox.vue';
+import { copyTextWithFallback } from '@/utils/clipboard';
+import {
+  buildInternalSurfaceResourceKey,
+  generateInternalSurfaceLink,
+  openInternalSurfaceLink,
+  resolveInternalSurfaceLinkBase,
+} from '@/utils/internalSurfaceLink';
+import { requestTheaterFloatingTakeover } from '@/utils/theaterFloatingBridge';
 
 const props = defineProps<{
   windowId: string;
+  standalone?: boolean;
 }>();
 
 const chatStore = useChatStore();
+const utilsStore = useUtilsStore();
 const sheetStore = useCharacterSheetStore();
 const templateStore = useCharacterCardTemplateStore();
 const message = useMessage();
@@ -223,6 +252,9 @@ const windowData = computed(() => sheetStore.windows[props.windowId]);
 const windowStyle = computed(() => {
   const win = windowData.value;
   if (!win) return {};
+  if (props.standalone) {
+    return { zIndex: win.zIndex };
+  }
   if (isMobile.value) {
     return { zIndex: win.zIndex };
   }
@@ -271,6 +303,51 @@ const checkMobile = () => {
 
 const handlePointerDown = () => {
   sheetStore.bringToFront(props.windowId);
+};
+
+const getInternalSurfaceResource = () => {
+  const win = windowData.value;
+  const worldId = String(win?.worldId || chatStore.currentWorldId || '').trim();
+  const channelId = String(win?.channelId || chatStore.curChannel?.id || '').trim();
+  if (!win?.cardId || !worldId || !channelId) {
+    message.warning('无法生成外部链接');
+    return null;
+  }
+  const params = {
+    type: 'character',
+    id: win.cardId,
+    worldId,
+    channelId,
+  } as const;
+  return {
+    key: buildInternalSurfaceResourceKey(params),
+    url: generateInternalSurfaceLink(params, { base: resolveInternalSurfaceLinkBase(utilsStore.config) }),
+    title: win.cardName?.trim() || '人物卡',
+    presentation: {
+      avatarUrl: iframeData.value.avatarUrl || undefined,
+      width: win.width,
+      height: win.height,
+    },
+  };
+};
+
+const getInternalSurfaceLink = () => getInternalSurfaceResource()?.url || null;
+
+const popoutInternalSurface = () => {
+  const link = getInternalSurfaceLink();
+  if (!link) return;
+  const win = windowData.value;
+  const opened = openInternalSurfaceLink(link, { width: win?.width, height: win?.height });
+  if (!opened) {
+    message.error('弹出失败，请允许浏览器弹窗');
+  }
+};
+
+const copyInternalSurfaceLink = async () => {
+  const link = getInternalSurfaceLink();
+  if (!link) return;
+  const copied = await copyTextWithFallback(link);
+  copied ? message.success('外部链接已复制') : message.error('复制失败');
 };
 
 const handleMobileBack = () => {
@@ -329,6 +406,7 @@ const unbindResizeListeners = (target: HTMLElement) => {
 };
 
 const startDrag = (e: PointerEvent) => {
+  if (props.standalone) return;
   if (isMobile.value) return;
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   const win = windowData.value;
@@ -389,9 +467,18 @@ const stopDrag = (e?: Event) => {
     unbindDragListeners(target);
   }
   clearPointerInteractionStyle();
+  if (e instanceof PointerEvent && e.type === 'pointerup') {
+    const resource = getInternalSurfaceResource();
+    if (resource) {
+      void requestTheaterFloatingTakeover(resource, e).then((accepted) => {
+        if (accepted) sheetStore.closeSheet(props.windowId);
+      });
+    }
+  }
 };
 
 const startResize = (e: PointerEvent) => {
+  if (props.standalone) return;
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   e.stopPropagation();
   e.preventDefault();
@@ -658,6 +745,20 @@ onBeforeUnmount(() => {
   width: 100% !important;
   height: 100% !important;
   border-radius: 0;
+}
+
+.character-sheet-window.is-standalone {
+  inset: 0 !important;
+  transform: none !important;
+  width: 100% !important;
+  height: 100% !important;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.character-sheet-window.is-standalone .sheet-window__header {
+  cursor: default;
 }
 
 .sheet-window__header {

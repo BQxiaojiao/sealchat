@@ -916,11 +916,19 @@ interface SearchJumpEvent {
   createdAt?: string | number | Date;
 }
 
+export interface InlineChatSplitOpenPayload {
+  worldId: string;
+  channelId: string;
+  title?: string;
+  forceOoc?: boolean;
+}
+
 interface ChatEventMap {
   [event: string]: (...args: any[]) => void;
   'channel-identity-updated': (payload?: ChannelIdentityUpdatedEvent) => void;
   'channel-identities-updated': (event?: ChannelIdentitiesGatewayEvent) => void;
   'search-jump': (payload?: SearchJumpEvent) => void;
+  'inline-chat-split-open': (payload: InlineChatSplitOpenPayload) => void;
 }
 
 export const chatEvent = new Emitter<ChatEventMap>();
@@ -1043,6 +1051,18 @@ let wsReconnectTimer: ReturnType<typeof setInterval> | null = null;
 let wsConnectionEpoch = 0;
 let wsConnectInFlight = false;
 let wsReconnectSuppressedEpoch = 0;
+let observerSessionInitInFlight: {
+  epoch: number;
+  worldId: string;
+  observerSlug: string;
+  promise: Promise<boolean>;
+} | null = null;
+let observerSessionInitialized: {
+  epoch: number;
+  worldId: string;
+  observerSlug: string;
+  channelId: string;
+} | null = null;
 let channelSwitchEpoch = 0;
 const channelSwitchGuard: {
   recent: Array<{ id: string; at: number }>;
@@ -1420,6 +1440,7 @@ export const useChatStore = defineStore({
       if (!this.observerMode) {
         return;
       }
+      observerSessionInitialized = null;
       this.observerMode = false;
       this.observerWorldId = '';
       this.observerChannelId = '';
@@ -1432,43 +1453,106 @@ export const useChatStore = defineStore({
       }
     },
 
-    async initObserverSession() {
+    async initObserverSession(options?: { connectionEpoch?: number }) {
       const worldId = this.observerWorldId ? this.observerWorldId.trim() : '';
       if (!worldId) {
         return false;
       }
-      try {
-        const detail = await this.worldDetail(worldId);
-        if (!detail) {
+      const observerSlug = this.observerSlug ? this.observerSlug.trim() : '';
+      const epoch = typeof options?.connectionEpoch === 'number'
+        ? options.connectionEpoch
+        : wsConnectionEpoch;
+      const initialized = observerSessionInitialized;
+      if (
+        initialized
+        && initialized.epoch === epoch
+        && initialized.worldId === worldId
+        && initialized.observerSlug === observerSlug
+        && initialized.channelId === (this.observerChannelId ? this.observerChannelId.trim() : '')
+      ) {
+        return true;
+      }
+      if (
+        observerSessionInitInFlight
+        && observerSessionInitInFlight.epoch === epoch
+        && observerSessionInitInFlight.worldId === worldId
+        && observerSessionInitInFlight.observerSlug === observerSlug
+      ) {
+        return observerSessionInitInFlight.promise;
+      }
+
+      const isCurrentSession = () => (
+        this.observerMode
+        && this.observerWorldId.trim() === worldId
+        && this.observerSlug.trim() === observerSlug
+        && (typeof options?.connectionEpoch !== 'number' || options.connectionEpoch === wsConnectionEpoch)
+      );
+      const task = (async () => {
+        try {
+          if (!isCurrentSession()) {
+            return false;
+          }
+          const detail = await this.worldDetail(worldId);
+          if (!detail || !isCurrentSession()) {
+            return false;
+          }
+          this.setCurrentWorld(worldId);
+          if (!this.joinedWorldIds.includes(worldId)) {
+            this.joinedWorldIds = [worldId];
+          }
+          await this.channelList(worldId, true);
+          if (!isCurrentSession()) {
+            return false;
+          }
+          let targetChannel = this.observerChannelId ? this.observerChannelId.trim() : '';
+          if (!targetChannel) {
+            targetChannel = readObserverSessionChannel(observerSlug, worldId);
+          }
+          const world = this.worldMap[worldId];
+          const firstChannelId = findFirstEnterableChannel(this.channelTreeByWorld[worldId] || [])?.id || '';
+          const fallbackChannel = firstChannelId || world?.defaultChannelId || '';
+          if (!targetChannel) {
+            targetChannel = fallbackChannel;
+          }
+          if (targetChannel) {
+            this.observerChannelId = targetChannel;
+            let switched = await this.channelSwitchTo(targetChannel);
+            if (!isCurrentSession()) {
+              return false;
+            }
+            if (!switched && fallbackChannel && fallbackChannel !== targetChannel) {
+              this.observerChannelId = fallbackChannel;
+              switched = await this.channelSwitchTo(fallbackChannel);
+              if (!isCurrentSession()) {
+                return false;
+              }
+            }
+            if (!switched) {
+              return false;
+            }
+          }
+          if (!isCurrentSession()) {
+            return false;
+          }
+          observerSessionInitialized = {
+            epoch,
+            worldId,
+            observerSlug,
+            channelId: this.observerChannelId ? this.observerChannelId.trim() : '',
+          };
+          return true;
+        } catch (err) {
+          console.warn('[observer] init failed', err);
           return false;
         }
-        this.setCurrentWorld(worldId);
-        if (!this.joinedWorldIds.includes(worldId)) {
-          this.joinedWorldIds = [worldId];
+      })();
+      observerSessionInitInFlight = { epoch, worldId, observerSlug, promise: task };
+      try {
+        return await task;
+      } finally {
+        if (observerSessionInitInFlight?.promise === task) {
+          observerSessionInitInFlight = null;
         }
-        await this.channelList(worldId, true);
-        let targetChannel = this.observerChannelId ? this.observerChannelId.trim() : '';
-        if (!targetChannel) {
-          targetChannel = readObserverSessionChannel(this.observerSlug, worldId);
-        }
-        const world = this.worldMap[worldId];
-        const firstChannelId = findFirstEnterableChannel(this.channelTreeByWorld[worldId] || [])?.id || '';
-        const fallbackChannel = firstChannelId || world?.defaultChannelId || '';
-        if (!targetChannel) {
-          targetChannel = fallbackChannel;
-        }
-        if (targetChannel) {
-          this.observerChannelId = targetChannel;
-          const switched = await this.channelSwitchTo(targetChannel);
-          if (!switched && fallbackChannel && fallbackChannel !== targetChannel) {
-            this.observerChannelId = fallbackChannel;
-            await this.channelSwitchTo(fallbackChannel);
-          }
-        }
-        return true;
-      } catch (err) {
-        console.warn('[observer] init failed', err);
-        return false;
       }
     },
 
@@ -1750,7 +1834,7 @@ export const useChatStore = defineStore({
       this.sendPresencePing(true);
 
       if (this.observerMode) {
-        await this.initObserverSession();
+        await this.initObserverSession({ connectionEpoch: epoch });
         resolvePendingConnectResolvers();
         return;
       }
@@ -2124,13 +2208,13 @@ export const useChatStore = defineStore({
       return this.favoriteWorldIds.includes(worldId);
     },
 
-    async joinWorld(worldId: string) {
+    async joinWorld(worldId: string, options?: { autoSwitch?: boolean }) {
       await api.post(`/api/v1/worlds/${worldId}/join`, {});
       if (!this.joinedWorldIds.includes(worldId)) {
         this.joinedWorldIds.push(worldId);
       }
       this.setCurrentWorld(worldId);
-      await this.channelList(worldId, true);
+      await this.channelList(worldId, true, { autoSwitch: options?.autoSwitch });
     },
 
     async leaveWorld(worldId: string) {
@@ -2360,7 +2444,7 @@ export const useChatStore = defineStore({
       return tree;
     },
 
-    async switchWorld(worldId: string, options?: { force?: boolean }) {
+    async switchWorld(worldId: string, options?: { force?: boolean; autoSwitch?: boolean }) {
       if (!worldId) {
         return;
       }
@@ -2370,7 +2454,7 @@ export const useChatStore = defineStore({
         return;
       }
       if (!this.joinedWorldIds.includes(worldId)) {
-        await this.joinWorld(worldId);
+        await this.joinWorld(worldId, { autoSwitch: false });
       } else {
         this.setCurrentWorld(worldId);
         await this.channelList(worldId, options?.force ?? true, { autoSwitch: false });
@@ -2379,15 +2463,17 @@ export const useChatStore = defineStore({
       if (currentChannelId && !findChannelByIdFromTree(this.channelTree, currentChannelId)) {
         this.clearCurrentChannelContext('switchWorld:currentChannelNotInTargetTree');
       }
-      const targetChannelId = resolvePreferredChannelForWorld({
-        worldId,
-        tree: this.channelTree,
-        defaultChannelId: this.worldMap[worldId]?.defaultChannelId,
-        lastChannelByWorld: this._lastChannelByWorld,
-        fallbackLastChannel: this._lastChannel,
-      });
-      if (targetChannelId) {
-        await this.channelSwitchTo(targetChannelId);
+      if (options?.autoSwitch !== false) {
+        const targetChannelId = resolvePreferredChannelForWorld({
+          worldId,
+          tree: this.channelTree,
+          defaultChannelId: this.worldMap[worldId]?.defaultChannelId,
+          lastChannelByWorld: this._lastChannelByWorld,
+          fallbackLastChannel: this._lastChannel,
+        });
+        if (targetChannelId) {
+          await this.channelSwitchTo(targetChannelId);
+        }
       }
     },
 
@@ -5528,6 +5614,13 @@ export const useChatStore = defineStore({
       return resp?.data;
     },
 
+    async channelMove(channelId: string, parentId?: string | null) {
+      const resp = await api.post<{ message: string }>(`api/v1/channels/${channelId}/move`, {
+        parentId: parentId || '',
+      });
+      return resp?.data;
+    },
+
     // 编辑频道背景
     async channelBackgroundEdit(id: string, updates: {
       backgroundAttachmentId?: string;
@@ -6262,6 +6355,7 @@ export const useChatStore = defineStore({
       includeImages?: boolean;
       includeDiceCommands?: boolean;
       withoutTimestamp?: boolean;
+      withoutOocParentheses?: boolean;
       mergeMessages?: boolean;
       autoCorrectPunctuation?: boolean;
       textColorizeBBCode?: boolean;
@@ -6280,6 +6374,7 @@ export const useChatStore = defineStore({
         include_images: params.includeImages ?? true,
         include_dice_commands: params.includeDiceCommands ?? true,
         without_timestamp: params.withoutTimestamp ?? false,
+        without_ooc_parentheses: params.withoutOocParentheses ?? false,
         merge_messages: params.mergeMessages ?? true,
         ...buildAutoCorrectPunctuationExportPayload(params.autoCorrectPunctuation),
       };
@@ -6300,6 +6395,8 @@ export const useChatStore = defineStore({
       }
       if (params.textColorizeBBCode) {
         payload.text_bbcode_colorize = true;
+      }
+      if (params.textColorizeBBCode || params.format.toLowerCase() === 'docx') {
         if (params.textColorizeBBCodeMap && Object.keys(params.textColorizeBBCodeMap).length > 0) {
           payload.text_bbcode_color_map = params.textColorizeBBCodeMap;
         }
@@ -6326,6 +6423,7 @@ export const useChatStore = defineStore({
       includeImages?: boolean;
       includeDiceCommands?: boolean;
       withoutTimestamp?: boolean;
+      withoutOocParentheses?: boolean;
       mergeMessages?: boolean;
       autoCorrectPunctuation?: boolean;
       textColorizeBBCode?: boolean;
@@ -6345,6 +6443,7 @@ export const useChatStore = defineStore({
         include_images: params.includeImages ?? true,
         include_dice_commands: params.includeDiceCommands ?? true,
         without_timestamp: params.withoutTimestamp ?? false,
+        without_ooc_parentheses: params.withoutOocParentheses ?? false,
         merge_messages: params.mergeMessages ?? true,
         ...buildAutoCorrectPunctuationExportPayload(params.autoCorrectPunctuation),
       };
@@ -6355,6 +6454,8 @@ export const useChatStore = defineStore({
       if (params.displaySettings) payload.display_settings = params.displaySettings;
       if (params.textColorizeBBCode) {
         payload.text_bbcode_colorize = true;
+      }
+      if (params.textColorizeBBCode || params.format.toLowerCase() === 'docx') {
         if (params.textColorizeBBCodeMap && Object.keys(params.textColorizeBBCodeMap).length > 0) {
           payload.text_bbcode_color_map = params.textColorizeBBCodeMap;
         }
