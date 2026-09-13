@@ -3,6 +3,7 @@ import { chatEvent } from '@/stores/chat'
 import type { CharacterCardApiStatus, CharacterCardAttrsPatchResult, CharacterCardData } from '@/stores/characterCard'
 import type { ChannelCharacterSnapshotItem } from '@/stores/channelCharacterSnapshot'
 import { resolveAttachmentUrl } from '@/composables/useAttachmentResolver'
+import { uploadChannelEmbedImage } from '@/services/embed/channelEmbedImageUpload'
 import { createChannelEmbedTheaterDialogue } from './channelEmbedTheaterDialogue'
 import {
   CHANNEL_EMBED_EVENT,
@@ -15,7 +16,7 @@ import {
   type EmbedRequest,
 } from './channelEmbedProtocol'
 
-const defaultCapabilities = ['context.read', 'user.read', 'members.read', 'world.admins.read', 'characters.read', 'characterCard.read', 'characterCard.write', 'permissions.read', 'storage.read', 'storage.write', 'events.subscribe', 'events.publish', 'messages.send']
+const defaultCapabilities = ['context.read', 'user.read', 'members.read', 'world.admins.read', 'characters.read', 'characterCard.read', 'characterCard.write', 'permissions.read', 'storage.read', 'storage.write', 'events.subscribe', 'events.publish', 'messages.send', 'attachments.upload']
 const publicErrorCodes = new Set(['ORIGIN_DENIED', 'HANDSHAKE_FAILED', 'SESSION_EXPIRED', 'CONTEXT_CHANGED', 'CAPABILITY_DENIED', 'PERMISSION_DENIED', 'INVALID_PARAMS', 'NOT_FOUND', 'REVISION_CONFLICT', 'QUOTA_EXCEEDED', 'PAYLOAD_TOO_LARGE', 'RATE_LIMITED', 'WS_OFFLINE', 'TIMEOUT', 'INTERNAL_ERROR'])
 
 const dialogueSource = createChannelEmbedTheaterDialogue(chatEvent, resolveAttachmentUrl)
@@ -174,7 +175,7 @@ export const createChannelEmbedHost = (deps: HostDeps) => {
   const currentActiveIdentityId = () => safeString(deps.chat.activeChannelIdentity?.[deps.channelId], 100)
   const effectiveCapabilities = () => policy.capabilities.filter((capability) => {
     if (!defaultCapabilities.includes(capability) && capability !== 'theater.dialogue.subscribe') return false
-    if (['members.read', 'characterCard.write', 'storage.write', 'events.publish', 'messages.send'].includes(capability) && (!deps.chat.curMember || deps.chat.observerMode)) return false
+    if (['members.read', 'characterCard.write', 'storage.write', 'events.publish', 'messages.send', 'attachments.upload'].includes(capability) && (!deps.chat.curMember || deps.chat.observerMode)) return false
     return true
   })
   const has = (capability: string) => effectiveCapabilities().includes(capability)
@@ -393,9 +394,10 @@ export const createChannelEmbedHost = (deps: HostDeps) => {
     if (method === 'events.publish' && !has('events.publish')) throw new Error('CAPABILITY_DENIED')
     if (method === 'events.subscribe' && !has('events.subscribe')) throw new Error('CAPABILITY_DENIED')
     if (method === 'messages.send' && !has('messages.send')) throw new Error('CAPABILITY_DENIED')
+    if (method === 'attachments.uploadImage' && !has('attachments.upload')) throw new Error('CAPABILITY_DENIED')
     if (method.startsWith('characterCard.') && !has(method === 'characterCard.updateAttrs' ? 'characterCard.write' : 'characterCard.read')) throw new Error('CAPABILITY_DENIED')
     if (method === 'members.list' && params.scope === 'world-admins' && !has('world.admins.read')) throw new Error('CAPABILITY_DENIED')
-    const contextSensitive = method.startsWith('storage.') || method === 'members.list' || method === 'member.getCurrent' || method.startsWith('characters.') || method.startsWith('characterCard.') || method === 'permissions.getCurrent' || method === 'events.publish' || method === 'events.subscribe' || method === 'messages.send'
+    const contextSensitive = method.startsWith('storage.') || method === 'members.list' || method === 'member.getCurrent' || method.startsWith('characters.') || method.startsWith('characterCard.') || method === 'permissions.getCurrent' || method === 'events.publish' || method === 'events.subscribe' || method === 'messages.send' || method === 'attachments.uploadImage'
     requireContext(request, contextSensitive)
     switch (method) {
       case 'theater.dialogue.subscribe': {
@@ -490,6 +492,16 @@ export const createChannelEmbedHost = (deps: HostDeps) => {
         const replyTo = params.replyTo === undefined ? undefined : boundedString(params.replyTo, 100, true)
         if (params.icMode !== undefined && params.icMode !== 'ic' && params.icMode !== 'ooc') throw new Error('INVALID_PARAMS')
         return deps.chat.messageCreate(text, replyTo, undefined, `iform_embed:${deps.form.id}:${randomEmbedId('message')}`, identityId || null, undefined, undefined, undefined, undefined, variantId, params.icMode, deps.channelId)
+      }
+      case 'attachments.uploadImage': {
+        if (!hasOnlyKeys(params, ['file', 'filename'])) throw new Error('INVALID_PARAMS')
+        if (typeof Blob === 'undefined' || !(params.file instanceof Blob)) throw new Error('INVALID_PARAMS')
+        const mimeType = safeString(params.file.type, 128).toLowerCase()
+        if (!mimeType.startsWith('image/')) throw new Error('INVALID_PARAMS')
+        const filename = params.filename === undefined ? undefined : boundedString(params.filename, 255)
+        const result = await uploadChannelEmbedImage(params.file, filename || undefined)
+        requireContext(request, true)
+        return result
       }
       default: throw new Error('NOT_FOUND: method')
     }

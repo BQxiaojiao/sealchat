@@ -86,6 +86,13 @@ export interface EmbedPermissionSummary {
   isSystemAdmin: boolean
   canManageWorld: boolean
 }
+export interface EmbedUploadedImage {
+  attachmentId: string
+  url: string
+  filename: string
+  mimeType: string
+  size: number
+}
 
 export class ChannelEmbedClient {
   private readonly port: MessagePort
@@ -246,6 +253,12 @@ export class ChannelEmbedClient {
       return this.on(`event:${topic}`, handler)
     },
     off: (topic: string, handler: EventHandler) => this.off(`event:${topic}`, handler),
+  }
+  readonly attachments = {
+    uploadImage: (file: File | Blob, options?: { filename?: string }) => this.request<EmbedUploadedImage>('attachments.uploadImage', {
+      file,
+      filename: options?.filename,
+    }, 60_000),
   }
   readonly messages = { send: (params: { text: string; replyTo?: string; identityId?: string; identityVariantId?: string; icMode?: 'ic' | 'ooc' }) => this.request('messages.send', params) }
 }

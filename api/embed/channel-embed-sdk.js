@@ -92,6 +92,12 @@
         },
         off: (topic, handler) => this.off(`event:${topic}`, handler)
       }
+      this.attachments = {
+        uploadImage: (file, options) => this.request('attachments.uploadImage', {
+          file,
+          filename: options && options.filename
+        }, 60000)
+      }
       this.messages = { send: params => this.request('messages.send', params) }
       port.onmessage = message => this.handleMessage(message.data)
       if (port.start) port.start()

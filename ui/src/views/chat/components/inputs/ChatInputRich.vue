@@ -827,8 +827,20 @@ const quickIFormForm = reactive({
   defaultHeight: 360,
   bridgeEnabled: false,
   bridgeAllowedOrigins: '',
-  bridgeCapabilities: 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send',
+  bridgeCapabilities: 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send,attachments.upload',
 });
+
+const hasQuickIFormCapability = (capability: string) => quickIFormForm.bridgeCapabilities
+  .split(',').map((item) => item.trim()).filter(Boolean).includes(capability);
+
+const toggleQuickIFormCapability = (capability: string, enabled: boolean) => {
+  const capabilities = new Set(quickIFormForm.bridgeCapabilities.split(',').map((item) => item.trim()).filter(Boolean));
+  if (enabled) capabilities.add(capability);
+  else capabilities.delete(capability);
+  quickIFormForm.bridgeCapabilities = [...capabilities].join(',');
+};
+
+const setQuickIFormImageUploadCapability = (enabled: boolean) => toggleQuickIFormCapability('attachments.upload', enabled);
 
 const canQuickCreateIForm = computed(() => {
   return !!chat.currentWorldId && !!chat.curChannel?.id && iform.canManage;
@@ -843,7 +855,7 @@ const resetQuickIFormForm = () => {
     defaultHeight: 360,
     bridgeEnabled: false,
     bridgeAllowedOrigins: '',
-    bridgeCapabilities: 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send',
+    bridgeCapabilities: 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send,attachments.upload',
   });
 };
 
@@ -4336,6 +4348,13 @@ defineExpose({
               :disabled="!quickIFormForm.bridgeEnabled"
               placeholder="能力，逗号分隔（storage.read 等）"
             />
+            <n-checkbox
+              :checked="hasQuickIFormCapability('attachments.upload')"
+              :disabled="!quickIFormForm.bridgeEnabled"
+              @update:checked="setQuickIFormImageUploadCapability"
+            >
+              上传图片附件（attachments.upload）
+            </n-checkbox>
           </n-space>
         </n-form-item>
       </n-form>

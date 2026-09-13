@@ -226,6 +226,13 @@
               </n-switch>
               <n-input v-model:value="formModel.bridgePolicy.allowedOrigins" placeholder="允许来源，逗号分隔（可选）" :disabled="!formModel.bridgePolicy.enabled" />
               <n-input v-model:value="formModel.bridgePolicy.capabilities" placeholder="能力，逗号分隔（storage.read 等）" :disabled="!formModel.bridgePolicy.enabled" />
+              <n-checkbox
+                :checked="hasBridgeCapability('attachments.upload')"
+                :disabled="!formModel.bridgePolicy.enabled"
+                @update:checked="setImageUploadCapability"
+              >
+                上传图片附件（attachments.upload）
+              </n-checkbox>
             </n-space>
           </n-form-item>
           <n-button v-if="editingForm?.templateRef" size="small" tertiary @click="resetTemplateOverrides">恢复模板默认</n-button>
@@ -338,7 +345,7 @@ const formModel = reactive({
   bridgePolicy: {
     enabled: false,
     allowedOrigins: '',
-    capabilities: 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send,characterCard.read,characterCard.write',
+    capabilities: 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send,characterCard.read,characterCard.write,attachments.upload',
   },
 });
 
@@ -355,6 +362,18 @@ const templatePageSize = 30;
 const templateTotal = ref(0);
 const importInput = ref<HTMLInputElement | null>(null);
 const htmlFileInput = ref<HTMLInputElement | null>(null);
+
+const hasBridgeCapability = (capability: string) => formModel.bridgePolicy.capabilities
+  .split(',').map((item) => item.trim()).filter(Boolean).includes(capability);
+
+const toggleBridgeCapability = (capability: string, enabled: boolean) => {
+  const capabilities = new Set(formModel.bridgePolicy.capabilities.split(',').map((item) => item.trim()).filter(Boolean));
+  if (enabled) capabilities.add(capability);
+  else capabilities.delete(capability);
+  formModel.bridgePolicy.capabilities = [...capabilities].join(',');
+};
+
+const setImageUploadCapability = (enabled: boolean) => toggleBridgeCapability('attachments.upload', enabled);
 
 const channelOptions = computed(() => flattenChannels(chat.channelTree || [], chat.curChannel?.id));
 
@@ -394,7 +413,7 @@ const resetFormModel = () => {
     bridgePolicy: {
       enabled: false,
       allowedOrigins: '',
-      capabilities: 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send,characterCard.read,characterCard.write',
+      capabilities: 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send,characterCard.read,characterCard.write,attachments.upload',
     },
   });
 };

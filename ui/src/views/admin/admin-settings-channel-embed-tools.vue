@@ -50,13 +50,25 @@ const columns = [
       h(NButton, { size: 'small', tertiary: true, type: 'error', onClick: () => deleteTemplate(row) }, { default: () => '删除' }),
     ] }) },
 ]
-const defaultBridgeCapabilities = 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send'
+const defaultBridgeCapabilities = 'context.read,user.read,members.read,world.admins.read,characters.read,permissions.read,storage.read,storage.write,events.subscribe,events.publish,messages.send,attachments.upload'
 const form = reactive({
   name: '', description: '', url: '', embedCode: '', defaultWidth: 640, defaultHeight: 360,
   defaultCollapsed: false, defaultFloating: false, allowPopout: true, enabled: true,
   mediaOptions: { autoPlay: false, autoUnmute: false, autoExpand: false, allowAudio: true, allowVideo: true },
   bridgePolicy: { enabled: true, allowedOrigins: '', capabilities: defaultBridgeCapabilities },
 })
+
+const hasBridgeCapability = (capability: string) => form.bridgePolicy.capabilities
+  .split(',').map((item) => item.trim()).filter(Boolean).includes(capability)
+
+const toggleBridgeCapability = (capability: string, enabled: boolean) => {
+  const capabilities = new Set(form.bridgePolicy.capabilities.split(',').map((item) => item.trim()).filter(Boolean))
+  if (enabled) capabilities.add(capability)
+  else capabilities.delete(capability)
+  form.bridgePolicy.capabilities = [...capabilities].join(',')
+}
+
+const setImageUploadCapability = (enabled: boolean) => toggleBridgeCapability('attachments.upload', enabled)
 
 const reset = () => {
   editingId.value = ''
@@ -350,7 +362,17 @@ onMounted(load)
           </n-switch>
         </n-form-item>
         <n-form-item label="允许来源"><n-input v-model:value="form.bridgePolicy.allowedOrigins" placeholder="以逗号分隔，例如 https://example.com" /></n-form-item>
-        <n-form-item label="能力列表"><n-input v-model:value="form.bridgePolicy.capabilities" placeholder="以逗号分隔，例如 resize,fullscreen" /></n-form-item>
+        <n-form-item label="能力列表">
+          <n-space vertical size="small">
+            <n-input v-model:value="form.bridgePolicy.capabilities" placeholder="以逗号分隔，例如 resize,fullscreen" />
+            <n-checkbox
+              :checked="hasBridgeCapability('attachments.upload')"
+              @update:checked="setImageUploadCapability"
+            >
+              上传图片附件（attachments.upload）
+            </n-checkbox>
+          </n-space>
+        </n-form-item>
       </n-form>
       <template #footer><n-space justify="end"><n-button @click="modalVisible = false">取消</n-button><n-button type="primary" @click="save">保存</n-button></n-space></template>
     </n-modal>

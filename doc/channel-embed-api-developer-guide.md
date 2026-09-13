@@ -91,7 +91,13 @@ const sealchat = await SealChatEmbed.connect({
 
 `SealChatEmbed.connect()` resolve 表示 Embed Session 握手成功，但不要把“握手成功”等同于“已经收到一次连接状态事件”。新建 Session 时，宿主不保证主动补发 `connection.changed`；`connection.onChanged()` 用于监听后续变化，客户端应在握手成功后主动调用一次 `connection.getState()` 初始化 UI 和本地状态。推荐先注册监听，再读取初始状态，以避免只依赖事件导致状态栏长期停留在“连接中”。
 
-iForm 管理员必须启用 Embed API、允许嵌入页 origin，并授予所需 Capability。`world.admins.read`、`characterCard.read` 和 `characterCard.write` 已加入新建 iForm 默认能力；旧 iForm 的已保存 policy 不会自动升级，请在编辑器的“能力”字段手工追加所需能力后保存。
+iForm 管理员必须启用 Embed API、允许嵌入页 origin，并授予所需 Capability。`world.admins.read`、`characterCard.read`、`characterCard.write` 和 `attachments.upload` 已加入新建 iForm 默认能力。
+
+普通独立 iForm 已保存的 BridgePolicy 不会因为版本升级自动追加新 capability，需要管理员显式修改后保存。通过内置模板安装的 iForm，如果没有对 BridgePolicy 设置 TemplateOverrides，则有效权限会继续跟随对应 builtin manifest；如果已经保存了 BridgePolicy override，则继续以 override 为准。
+
+常用 Channel Embed capability 包括：`context.read`、`user.read`、`members.read`、`world.admins.read`、`characters.read`、`characterCard.read`、`characterCard.write`、`permissions.read`、`storage.read`、`storage.write`、`events.subscribe`、`events.publish`、`messages.send`、`attachments.upload`。
+
+另外，SealChat 内置小剧场工具还使用专用 capability：`theater.dialogue.subscribe`。
 
 连接断开分两类：
 
@@ -476,6 +482,38 @@ await sealchat.messages.send({
 ```
 
 未指定 `identityId` 时使用当前激活角色。指定角色或变体时，必须属于当前频道且当前用户有权使用。
+
+### 图片附件上传
+
+| API | Capability | 说明 |
+| --- | --- | --- |
+| `attachments.uploadImage(file, options?)` | `attachments.upload` | 通过 Host 代理上传当前 Embed Session 用户的图片附件 |
+
+```ts
+interface EmbedUploadedImage {
+  attachmentId: string
+  url: string
+  filename: string
+  mimeType: string
+  size: number
+}
+
+const input = document.querySelector('input[type=file]')!
+const image = await sealchat.attachments.uploadImage(input.files![0])
+console.log(image.url)
+
+const canvas = document.querySelector('canvas')!
+const blob = await new Promise<Blob | null>(resolve =>
+  canvas.toBlob(resolve, 'image/png')
+)
+const mapImage = await sealchat.attachments.uploadImage(blob!, {
+  filename: 'battle-map.png',
+})
+```
+
+该 API 仅接受 `File | Blob`，且 MIME 必须是 `image/*`。请求由 ChannelEmbedHost 代理，iframe 不会获得 SealChat token、cookie、Authorization header 或原始 WebSocket，也不能指定任意 `channelId`、`userId`、`ownerUserId`、`rootId`、`parentId` 或其他附件内部关系。Host 使用当前登录态调用标准 `POST /api/v1/attachment-upload`，随后立即调用 `POST /api/v1/attachment-confirm` 并设置 `isTemp: false`；上传附件归当前 Embed Session 的已认证用户。
+
+Host 复用现有 `compressImage()`：非 GIF 图片沿用 `imageCompressQuality`、默认 2048 尺寸和 WebP 策略，GIF 按现有逻辑保留原文件。普通 Embed RPC 默认超时为 10 秒，图片上传单独使用 60 秒。返回的 `url` 是兼容 SealChat `WebUrl`/base path 的 absolute URL，可直接用于 `<img src>`；附件接口可能进一步重定向至 S3。Session 用户变化、退出登录或频道上下文失效时沿用 `SESSION_EXPIRED` / `CONTEXT_CHANGED`；缺少 capability 返回 `CAPABILITY_DENIED`，参数错误返回 `INVALID_PARAMS`，图片或上传大小超限尽量返回 `PAYLOAD_TOO_LARGE`。
 
 ### Client 通用方法
 

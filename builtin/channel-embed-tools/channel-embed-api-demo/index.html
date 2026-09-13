@@ -269,6 +269,17 @@
     pre.result { min-height: 60px; max-height: 160px; }
     pre.log { height: 180px; background: #000000; color: #00ff66; }
 
+    .image-preview {
+      display: block;
+      max-width: min(100%, 420px);
+      max-height: 260px;
+      margin-top: 8px;
+      border: 2px solid;
+      border-color: var(--win-dark) var(--win-light) var(--win-light) var(--win-dark);
+      background: #ffffff;
+      object-fit: contain;
+    }
+
     /* 状态点与指示灯 */
     .status {
       display: inline-flex;
@@ -530,6 +541,36 @@
       </fieldset>
     </div>
 
+    <!-- 图片附件上传 -->
+    <fieldset>
+      <legend>图片附件上传 (Image Attachment Upload)</legend>
+      <div class="grid-2col">
+        <div>
+          <div class="hint">需要 <code>attachments.upload</code> capability；仅支持 <code>image/*</code>。Host 自动压缩并在上传后确认正式附件。</div>
+          <label for="imageFile">图片文件:</label>
+          <input id="imageFile" type="file" accept="image/*" style="width:100%">
+          <label for="imageFilename">filename（可选）:</label>
+          <input id="imageFilename" placeholder="例如 battle-map.png" style="width:100%">
+          <div style="margin-top:6px;"><button id="uploadImageButton">上传图片</button></div>
+          <label for="imageAttachmentId">attachmentId:</label>
+          <input id="imageAttachmentId" readonly style="width:100%">
+          <label for="imageUrl">url:</label>
+          <input id="imageUrl" readonly style="width:100%">
+          <label for="imageResultFilename">filename:</label>
+          <input id="imageResultFilename" readonly style="width:100%">
+          <label for="imageMimeType">mimeType:</label>
+          <input id="imageMimeType" readonly style="width:100%">
+          <label for="imageSize">size（bytes）:</label>
+          <input id="imageSize" readonly style="width:100%">
+          <img id="imagePreview" class="image-preview" alt="上传图片预览" hidden>
+        </div>
+        <div>
+          <label>完整返回 JSON / error:</label>
+          <pre id="imageResult" class="result">-</pre>
+        </div>
+      </div>
+    </fieldset>
+
     <!-- 实时事件日志 -->
     <fieldset>
       <legend>实时事件控制台日志 (Event Monitor Log)</legend>
@@ -552,6 +593,7 @@
         <li>A 点击 <b>set</b>，B 应收到 <code>storage.changed</code>，seq 递增；B 再执行 get/snapshot 验证内容。</li>
         <li>两个实例读取同一 revision 后同时 set：一个成功，另一个应得到 <code>REVISION_CONFLICT</code>。</li>
         <li>A publish <code>demo.ping</code>，B 订阅同 topic 后应收到 event；刷新或重连后 event 不应 replay。</li>
+        <li>选择 <code>image/*</code> 图片上传；未开启 <code>attachments.upload</code> 时应显示 <code>CAPABILITY_DENIED</code>，开启后显示 attachmentId、url、filename、mimeType、size 和图片预览。</li>
         <li>切换频道、关闭 form、退出登录后，旧窗口请求应失败并显示 <code>SESSION_EXPIRED</code> 或 <code>CONTEXT_CHANGED</code>。</li>
       </ol>
     </fieldset>
@@ -738,6 +780,12 @@
       publish: (topic, payload) => this.request('events.publish', { topic, payload }),
       on: (topic, handler) => { void this.request('events.subscribe', { topic }).catch(() => undefined); return this.on(`event:${topic}`, handler) },
       off: (topic, handler) => this.off(`event:${topic}`, handler),
+    }
+    attachments = {
+      uploadImage: (file, options) => this.request('attachments.uploadImage', {
+        file,
+        filename: options?.filename,
+      }, 60000),
     }
     messages = { send: (params) => this.request('messages.send', params) }
   }
@@ -1063,6 +1111,30 @@
       }
       await call('messages.send', () => sealchat.messages.send(params), 'messageResult')
     } catch {}
+  })
+  $('uploadImageButton').addEventListener('click', async () => {
+    try {
+      await connect()
+      const file = $('imageFile').files?.[0]
+      if (!file) throw new Error('请选择图片文件')
+      const filename = $('imageFilename').value.trim() || undefined
+      const result = await call('attachments.uploadImage', () => sealchat.attachments.uploadImage(file, { filename }), 'imageResult')
+      $('imageAttachmentId').value = result.attachmentId || ''
+      $('imageUrl').value = result.url || ''
+      $('imageResultFilename').value = result.filename || ''
+      $('imageMimeType').value = result.mimeType || ''
+      $('imageSize').value = result.size == null ? '' : String(result.size)
+      const preview = $('imagePreview')
+      preview.hidden = !result.url
+      preview.src = result.url || ''
+    } catch (error) {
+      $('imageAttachmentId').value = ''
+      $('imageUrl').value = ''
+      $('imageResultFilename').value = ''
+      $('imageMimeType').value = ''
+      $('imageSize').value = ''
+      $('imagePreview').hidden = true
+    }
   })
 
   window.addEventListener('beforeunload', close)
