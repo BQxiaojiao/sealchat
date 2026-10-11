@@ -91,3 +91,26 @@ test('paced packets decode continuously before input end', () => {
   const result = drain(decoder)[0]
   assert.ok(received.length + result.length >= 48000)
 })
+
+test('brief underrun after playback starts waits for more PCM and recovers', () => {
+  const decoder = new PCMStream(24000, 1, 48000)
+  const bytes = tone(24000, 1)
+  decoder.push(bytes.slice(0, 14400).buffer) // 300ms prebuffer, enough to start.
+  const first = decoder.render(14400)
+  assert.equal(first.underrun, false)
+  assert.ok(first.output[0].some(value => Math.abs(value) > 0.4))
+  for (let i = 0; i < 80; i++) assert.equal(decoder.render(128).underrun, false)
+  decoder.push(bytes.slice(14400, 19200).buffer)
+  const resumed = decoder.render(128)
+  assert.equal(resumed.underrun, false)
+  assert.ok(resumed.output[0].some(value => Math.abs(value) > 0))
+})
+
+test('sustained underrun still desyncs after the grace window', () => {
+  const decoder = new PCMStream(24000, 1, 48000)
+  decoder.push(tone(24000, 1, 0.3).buffer)
+  decoder.render(14400)
+  let underrun = false
+  for (let i = 0; i < 120 && !underrun; i++) underrun = decoder.render(128).underrun
+  assert.equal(underrun, true)
+})
