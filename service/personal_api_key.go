@@ -112,7 +112,7 @@ func personalKeyHash(secret string) string {
 
 func ListPersonalAPIKeys(userID string) ([]model.PersonalAPIKeyModel, error) {
 	items := []model.PersonalAPIKeyModel{}
-	err := personalKeyDB().Where("user_id = ?", userID).Order("created_at DESC, id DESC").Find(&items).Error
+	err := personalKeyDB().Where("user_id = ? AND revoked_at IS NULL", userID).Order("created_at DESC, id DESC").Find(&items).Error
 	return items, err
 }
 
