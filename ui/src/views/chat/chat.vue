@@ -193,6 +193,7 @@ import MessageImageEditor from '@/components/chat/MessageImageEditor.vue';
 import type { MessageImageEditorResult } from '@/composables/useMessageImageEditor';
 import { ensurePinyinLoaded, matchKeywords, matchText, type KeywordMatchResult } from '@/utils/pinyinMatch';
 import { generateIFormEmbedLink } from '@/utils/iformEmbedLink';
+import { resolvePublicLinkBase } from '@/utils/publicLinkBase';
 import { buildMessageCursor } from '@/utils/messageCursor';
 import {
   buildInternalSurfaceResourceKey,
@@ -601,22 +602,6 @@ const handleDice3DDockMove = async (position: { x: number, y: number }) => {
   }
 };
 
-const resolveIFormEmbedLinkBase = () => {
-  const domain = utils.config?.domain?.trim() || '';
-  if (!domain) {
-    return undefined;
-  }
-  const webUrl = utils.config?.webUrl?.trim() || '';
-  let base = domain;
-  if (!/^(https?:)?\/\//i.test(base)) {
-    base = `${window.location.protocol}//${base}`;
-  }
-  if (webUrl) {
-    base = `${base}${webUrl.startsWith('/') ? '' : '/'}${webUrl}`;
-  }
-  return base;
-};
-
 const defaultIFormEmbedLink = computed(() => {
   const worldId = chat.currentWorldId;
   const channelId = chat.curChannel?.id;
@@ -635,7 +620,7 @@ const defaultIFormEmbedLink = computed(() => {
       width: firstForm.defaultWidth,
       height: firstForm.defaultHeight,
     },
-    { base: resolveIFormEmbedLinkBase() },
+    { base: resolvePublicLinkBase(utils.config) },
   );
 });
 

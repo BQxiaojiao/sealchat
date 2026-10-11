@@ -13,6 +13,7 @@ import { useChatStore } from '@/stores/chat';
 import { useIFormStore } from '@/stores/iform';
 import { useUtilsStore } from '@/stores/utils';
 import { generateIFormEmbedLink } from '@/utils/iformEmbedLink';
+import { resolvePublicLinkBase } from '@/utils/publicLinkBase';
 import { readHtmlFile } from '@/utils/htmlFile';
 import { matchText } from '@/utils/pinyinMatch';
 import { contentUnescape } from '@/utils/tools';
@@ -937,22 +938,6 @@ const resetQuickIFormForm = () => {
   });
 };
 
-const resolveIFormEmbedLinkBase = () => {
-  const domain = utils.config?.domain?.trim() || '';
-  if (!domain) {
-    return undefined;
-  }
-  const webUrl = utils.config?.webUrl?.trim() || '';
-  let base = domain;
-  if (!/^(https?:)?\/\//i.test(base)) {
-    base = `${window.location.protocol}//${base}`;
-  }
-  if (webUrl) {
-    base = `${base}${webUrl.startsWith('/') ? '' : '/'}${webUrl}`;
-  }
-  return base;
-};
-
 const openQuickIFormCreateModal = () => {
   if (!chat.curChannel?.id || !chat.currentWorldId) {
     message.warning('当前未定位到有效频道');
@@ -1034,7 +1019,7 @@ const confirmQuickIFormCreate = async () => {
         width: createdForm.defaultWidth || width,
         height: createdForm.defaultHeight || height,
       },
-      { base: resolveIFormEmbedLinkBase() },
+      { base: resolvePublicLinkBase(utils.config) },
     );
     editor.value?.chain().focus().insertContent(link).run();
     quickIFormModalShow.value = false;

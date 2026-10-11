@@ -33,6 +33,7 @@ import type { AnnouncementItem } from '@/models/announcement';
 import { shouldRenderChannelSidebarList } from '@/stores/chatChannelSelection';
 import { useUtilsStore } from '@/stores/utils';
 import { generateChannelLink } from '@/utils/messageLink';
+import { resolvePublicLinkBase } from '@/utils/publicLinkBase';
 import { copyTextWithFallback } from '@/utils/clipboard';
 import { isTheaterChatFrame, requestTheaterChatFloatingOpen } from '@/utils/theaterFloatingBridge';
 
@@ -108,28 +109,12 @@ const handleChannelCopy = async (channel: SChannel) => {
   showCopyModal.value = true;
 };
 
-const resolveChannelLinkBase = (): string => {
-  const domain = utils.config?.domain?.trim() || '';
-  if (!domain) {
-    return '';
-  }
-  const webUrl = utils.config?.webUrl?.trim() || '';
-  let base = domain;
-  if (!/^(https?:)?\/\//i.test(base)) {
-    base = `${window.location.protocol}//${base}`;
-  }
-  if (webUrl) {
-    base = `${base}${webUrl.startsWith('/') ? '' : '/'}${webUrl}`;
-  }
-  return base;
-};
-
 const handleChannelCopyLink = async (channel: SChannel) => {
   if (!channel?.id || !chat.currentWorldId) {
     message.error('无法生成频道链接');
     return;
   }
-  const linkBase = resolveChannelLinkBase();
+  const linkBase = resolvePublicLinkBase(utils.config);
   const link = generateChannelLink(
     {
       worldId: chat.currentWorldId,

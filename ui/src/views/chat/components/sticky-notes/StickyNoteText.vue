@@ -5,6 +5,7 @@ import { useStickyNoteStore } from '@/stores/stickyNote'
 import StickyNoteEditor from '../StickyNoteEditor.vue'
 import { isTipTapJson, tiptapJsonToHtml, tiptapJsonToPlainText } from '@/utils/tiptap-render'
 import { parseSingleIFormEmbedLinkText, generateIFormEmbedLink } from '@/utils/iformEmbedLink'
+import { resolvePublicLinkBase } from '@/utils/publicLinkBase'
 import IFormEmbedFrame from '@/components/iform/IFormEmbedFrame.vue'
 import type { ChannelIForm } from '@/types/iform'
 import { useIFormStore } from '@/stores/iform'
@@ -31,22 +32,6 @@ const localContent = ref('')
 const richMode = ref(false)
 const editorRef = ref<InstanceType<typeof StickyNoteEditor> | null>(null)
 
-const resolveIFormEmbedLinkBase = () => {
-  const domain = utils.config?.domain?.trim() || ''
-  if (!domain) {
-    return undefined
-  }
-  const webUrl = utils.config?.webUrl?.trim() || ''
-  let base = domain
-  if (!/^(https?:)?\/\//i.test(base)) {
-    base = `${window.location.protocol}//${base}`
-  }
-  if (webUrl) {
-    base = `${base}${webUrl.startsWith('/') ? '' : '/'}${webUrl}`
-  }
-  return base
-}
-
 const defaultIFormEmbedLink = computed(() => {
   const channelId = (props.note?.channelId || '').trim()
   const worldId = (chat.currentWorldId || '').trim()
@@ -65,7 +50,7 @@ const defaultIFormEmbedLink = computed(() => {
       width: firstForm.defaultWidth,
       height: firstForm.defaultHeight,
     },
-    { base: resolveIFormEmbedLinkBase() },
+    { base: resolvePublicLinkBase(utils.config) },
   )
 })
 

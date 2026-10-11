@@ -8,6 +8,7 @@ import { useChatStore } from '@/stores/chat';
 import { useIFormStore } from '@/stores/iform';
 import { useUtilsStore } from '@/stores/utils';
 import { generateIFormEmbedLink } from '@/utils/iformEmbedLink';
+import { resolvePublicLinkBase } from '@/utils/publicLinkBase';
 import { copyTextWithFallback } from '@/utils/clipboard';
 
 const props = withDefaults(defineProps<{
@@ -41,22 +42,6 @@ const isFocused = ref(false);
 const isSyncingFromProps = ref(false);
 const isUploading = ref(false);
 
-const resolveIFormEmbedLinkBase = () => {
-  const domain = utils.config?.domain?.trim() || '';
-  if (!domain) {
-    return undefined;
-  }
-  const webUrl = utils.config?.webUrl?.trim() || '';
-  let base = domain;
-  if (!/^(https?:)?\/\//i.test(base)) {
-    base = `${window.location.protocol}//${base}`;
-  }
-  if (webUrl) {
-    base = `${base}${webUrl.startsWith('/') ? '' : '/'}${webUrl}`;
-  }
-  return base;
-};
-
 const defaultIFormEmbedLink = computed(() => {
   const channelId = (props.channelId || '').trim();
   const worldId = (chat.currentWorldId || '').trim();
@@ -75,7 +60,7 @@ const defaultIFormEmbedLink = computed(() => {
       width: firstForm.defaultWidth,
       height: firstForm.defaultHeight,
     },
-    { base: resolveIFormEmbedLinkBase() },
+    { base: resolvePublicLinkBase(utils.config) },
   );
 });
 
