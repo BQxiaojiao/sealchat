@@ -16,6 +16,7 @@ import AdminSettingsChannelEmbedTools from './admin-settings-channel-embed-tools
 import AdminSettingsCharacterCardTemplates from './admin-settings-character-card-templates.vue'
 import AdminMCPSettings from './AdminMCPSettings.vue'
 import { computed, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 type AdminTab = 'basic' | 'update' | 'backup-storage' | 'bot' | 'user' | 'external-glossary' | 'audio' | 'theme-style' | 'ai' | 'ai-speech' | 'certificate' | 'channel-embed-tools' | 'character-card-templates' | 'mcp'
 
@@ -28,6 +29,7 @@ const props = withDefaults(defineProps<{ initialTab?: AdminTab }>(), {
   initialTab: 'basic',
 });
 const emit = defineEmits(['close']);
+const router = useRouter();
 const activeTab = ref<AdminTab>(props.initialTab);
 const basicSettingsRef = ref<AdminSettingsTabExpose | null>(null);
 const aiSettingsRef = ref<AdminSettingsTabExpose | null>(null);
@@ -82,6 +84,11 @@ const cancel = () => {
   emit('close');
 }
 
+const openPlatformStatus = () => {
+  const { href } = router.resolve({ name: 'status' });
+  window.open(href, '_blank', 'noopener,noreferrer');
+}
+
 const closeAudioDrawer = () => {
   audioDrawerVisible.value = false;
 }
@@ -108,6 +115,7 @@ const saveCurrentTab = async () => {
     <div class="sc-admin-settings-header">
       <h2 class="text-lg mb-0">平台管理</h2>
       <div class="sc-admin-settings-actions">
+        <n-button @click="openPlatformStatus">平台状态监测</n-button>
         <n-button @click="cancel">关闭</n-button>
         <n-button
           v-if="showSaveAction"
