@@ -197,6 +197,20 @@ func sqliteSchemaVersion(t *testing.T, conn *gorm.DB) int {
 	return version
 }
 
+func TestMessageAutoMigrateIsIdempotentOnSQLite(t *testing.T) {
+	conn := newSchemaMigrationTestDB(t)
+	if err := conn.AutoMigrate(&MessageModel{}); err != nil {
+		t.Fatalf("initial message migrate: %v", err)
+	}
+	before := sqliteSchemaVersion(t, conn)
+	if err := conn.AutoMigrate(&MessageModel{}); err != nil {
+		t.Fatalf("second message migrate: %v", err)
+	}
+	if after := sqliteSchemaVersion(t, conn); after != before {
+		t.Fatalf("second message AutoMigrate changed schema_version: %d -> %d", before, after)
+	}
+}
+
 func TestMessagesDropQuoteConstraintSQLite(t *testing.T) {
 	for _, scenario := range []string{"missing table", "no constraint", "legacy constraint"} {
 		t.Run(scenario, func(t *testing.T) {
