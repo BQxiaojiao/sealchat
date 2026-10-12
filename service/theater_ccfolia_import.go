@@ -86,6 +86,7 @@ type ccfoliaEntities struct {
 	Characters  map[string]ccfoliaCharacter `json:"characters"`
 	Scenes      map[string]ccfoliaScene     `json:"scenes"`
 	Notes       map[string]ccfoliaNote      `json:"notes"`
+	Effects     map[string]ccfoliaEffect    `json:"effects"`
 	Savedatas   map[string]ccfoliaSavedata  `json:"savedatas"`
 	Snapshots   map[string]ccfoliaSnapshot  `json:"snapshots"`
 	Unsupported map[string]json.RawMessage  `json:"-"`
@@ -106,6 +107,7 @@ func (item *ccfoliaEntities) UnmarshalJSON(data []byte) error {
 	delete(unsupported, "characters")
 	delete(unsupported, "scenes")
 	delete(unsupported, "notes")
+	delete(unsupported, "effects")
 	delete(unsupported, "savedatas")
 	delete(unsupported, "snapshots")
 	*item = ccfoliaEntities(value)
@@ -121,6 +123,9 @@ func (item *ccfoliaEntities) UnmarshalJSON(data []byte) error {
 	}
 	if item.Notes == nil {
 		item.Notes = map[string]ccfoliaNote{}
+	}
+	if item.Effects == nil {
+		item.Effects = map[string]ccfoliaEffect{}
 	}
 	if item.Savedatas == nil {
 		item.Savedatas = map[string]ccfoliaSavedata{}
@@ -275,6 +280,25 @@ func (item *ccfoliaNote) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type ccfoliaEffect struct {
+	Name     string          `json:"name"`
+	ImageURL *string         `json:"imageUrl"`
+	SoundRef json.RawMessage `json:"soundRef"`
+	Order    float64         `json:"order"`
+	Raw      json.RawMessage `json:"-"`
+}
+
+func (item *ccfoliaEffect) UnmarshalJSON(data []byte) error {
+	type plain ccfoliaEffect
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*item = ccfoliaEffect(value)
+	item.Raw = append(item.Raw[:0], data...)
+	return nil
+}
+
 type ccfoliaSavedata struct {
 	Name            string          `json:"name"`
 	Thumbnail       *string         `json:"thumbnail"`
@@ -379,6 +403,9 @@ func (item *ccfoliaResourceDescriptor) UnmarshalJSON(data []byte) error {
 type ccfoliaAssetTarget struct {
 	ResourceID      string
 	MimeType        string
+	OriginalMIME    string
+	DurationMS      int64
+	OriginalOnly    bool
 	Animated        bool
 	PlaybackVariant string
 	LoopCount       *int
@@ -860,7 +887,7 @@ func loadCCFOLIAResources(root string, backup *ccfoliaBackup) ([]TheaterPackageR
 			Variants: []TheaterPackageResourceVariant{},
 		}
 		resources = append(resources, resource)
-		targets[ref] = ccfoliaAssetTarget{ResourceID: resourceID, MimeType: mediaMIME, Animated: isAnimated, LoopCount: metadata.LoopCount, Width: metadata.Width, Height: metadata.Height}
+		targets[ref] = ccfoliaAssetTarget{ResourceID: resourceID, MimeType: mediaMIME, OriginalMIME: mediaMIME, DurationMS: metadata.DurationMS, Animated: isAnimated, LoopCount: metadata.LoopCount, Width: metadata.Width, Height: metadata.Height}
 	}
 	warnings := recoveryWarnings
 	entries, err := os.ReadDir(root)
@@ -877,9 +904,20 @@ func loadCCFOLIAResources(root string, backup *ccfoliaBackup) ([]TheaterPackageR
 	}
 	references := ccfoliaAssetReferences(*backup)
 	for ref, paths := range references {
-		if _, ok := targets[ref]; !ok {
+		target, ok := targets[ref]
+		if !ok {
 			return nil, nil, 0, nil, fmt.Errorf("CCFOLIA 引用资源未声明或缺失: %s (%s)", ref, strings.Join(paths, ", "))
 		}
+		// Native animated images preserve transparency across browsers without
+		// depending on an FFmpeg VP9 encoder or browser WebM alpha support.
+		target.OriginalOnly = true
+		for _, path := range paths {
+			if !strings.HasPrefix(path, "entities.effects.") {
+				target.OriginalOnly = false
+				break
+			}
+		}
+		targets[ref] = target
 	}
 	for ref := range targets {
 		if len(references[ref]) == 0 {
@@ -896,7 +934,7 @@ func prepareCCFOLIAAnimatedResources(ctx context.Context, root string, resources
 	derivedRoot := filepath.Join(root, ".sealchat-derived")
 	for index := range resources {
 		resource := &resources[index]
-		if resource.Kind != "animated_image" {
+		if resource.Kind != "animated_image" || targets[resource.ID].OriginalOnly {
 			continue
 		}
 		processed, err := processor.ProcessTheaterResource(ctx, filepath.Join(root, resource.Original.Path), resource.Kind, resource.MimeType)
@@ -909,12 +947,18 @@ func prepareCCFOLIAAnimatedResources(ctx context.Context, root string, resources
 				if output.Name != VisualMediaOutputDisplay {
 					continue
 				}
+				if output.IsSource {
+					// The original is already imported. Registering it again as a
+					// display file would move the same local file a second time.
+					target := targets[resource.ID]
+					target.MimeType = output.MimeType
+					target.PlaybackVariant = ""
+					targets[resource.ID] = target
+					return
+				}
 				relative := filepath.ToSlash(filepath.Join(".sealchat-derived", resource.ContentHash+".display.webm"))
 				targetPath := filepath.Join(derivedRoot, resource.ContentHash+".display.webm")
-				if output.IsSource {
-					targetPath = filepath.Join(root, resource.Original.Path)
-					relative = resource.Original.Path
-				} else if err = copyTheaterPackageFile(output.Path, targetPath); err != nil {
+				if err = copyTheaterPackageFile(output.Path, targetPath); err != nil {
 					return
 				}
 				var file TheaterPackageFile
@@ -1258,11 +1302,20 @@ func convertCCFOLIABackup(backup ccfoliaBackup, worldID string, targets map[stri
 		return ccfoliaConversion{}, err
 	}
 	warnings = append(warnings, itemWarnings...)
+	effects, effectWarnings, err := ccfoliaEffects(backup.Entities.Effects, worldID, targets)
+	if err != nil {
+		return ccfoliaConversion{}, err
+	}
+	for objectID, effect := range effects {
+		persistent[objectID] = effect
+	}
+	warnings = append(warnings, effectWarnings...)
 	warnings = ccfoliaUniqueWarnings(warnings)
 	snapshot.PersistentObjects = persistent
 	summary := summarizeTheaterSnapshot(snapshot)
 	summary.SourceFormat = "ccfolia-backup"
 	summary.SourceVersion = backup.Meta.Version
+	summary.Effects = len(effects)
 	summary.CurrentRoomObjects = len(currentObjects)
 	summary.UnsupportedEntities = unsupported
 	summary.Warnings = warnings
@@ -1709,6 +1762,85 @@ func ccfoliaItems(items map[string]ccfoliaItem, worldID string, targets map[stri
 	return objects, warnings, nil
 }
 
+func ccfoliaEffects(effects map[string]ccfoliaEffect, worldID string, targets map[string]ccfoliaAssetTarget) (map[string]TheaterObjectSnapshot, []string, error) {
+	ids := make([]string, 0, len(effects))
+	for id := range effects {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		if effects[ids[i]].Order == effects[ids[j]].Order {
+			return ids[i] < ids[j]
+		}
+		return effects[ids[i]].Order < effects[ids[j]].Order
+	})
+	objects := make(map[string]TheaterObjectSnapshot, len(ids))
+	warnings := []string{}
+	for index, sourceID := range ids {
+		effect := effects[sourceID]
+		if sound := bytes.TrimSpace(effect.SoundRef); len(sound) > 0 && !bytes.Equal(sound, []byte("null")) {
+			warnings = appendWarning(warnings, "CCFOLIA 特效音频暂不映射，已保留源数据: "+sourceID)
+		}
+		if effect.ImageURL == nil || strings.TrimSpace(*effect.ImageURL) == "" {
+			warnings = appendWarning(warnings, "CCFOLIA 特效没有图片，已跳过并保留源数据: "+sourceID)
+			continue
+		}
+		ref := strings.TrimSpace(*effect.ImageURL)
+		target, ok := targets[ref]
+		if !ok {
+			return nil, warnings, fmt.Errorf("CCFOLIA effect %s 引用资源不存在: %s", sourceID, ref)
+		}
+		// Even when a shared image has a stage playback variant, effects use the
+		// original animated image rather than a browser-dependent alpha video.
+		target.PlaybackVariant = ""
+		if target.OriginalMIME != "" {
+			target.MimeType = target.OriginalMIME
+		}
+		name := ccfoliaName(effect.Name, "CCFOLIA Effect")
+		duration := target.DurationMS
+		if duration <= 0 {
+			duration = 3500
+		}
+		if duration < 300 {
+			duration = 300
+		} else if duration > 30000 {
+			duration = 30000
+			warnings = appendWarning(warnings, "CCFOLIA 特效时长超过 SealChat 上限，已限制为 30000ms: "+sourceID)
+		}
+		content, err := json.Marshal(map[string]any{"effect": map[string]any{
+			"version": 1, "kind": "media", "keywords": []string{}, "targetActorName": nil,
+			"durationMs": duration, "fadeOut": false, "cooldownMs": 0,
+			"media": ccfoliaImageTargetRef(target, name, worldID), "audio": nil,
+			"builtin": map[string]any{
+				"theme": "brush", "format": "popout", "text": name, "subText": "",
+				"accentColor": "#e61c34", "mainTextColor": "#ffffff", "subTextColor": "#000000",
+				"dimIntensity": 0, "shakeIntensity": 0,
+				"mediaTransform": map[string]any{"x": 0, "y": 0, "scale": 1, "rotation": 0, "mirror": false},
+			},
+		}})
+		if err != nil {
+			return nil, warnings, err
+		}
+		metadata, err := json.Marshal(map[string]any{"ccfolia": map[string]any{
+			"sourceEffectId": sourceID, "sourceOrder": effect.Order, "sourceRaw": string(effect.Raw),
+		}})
+		if err != nil {
+			return nil, warnings, err
+		}
+		objectID := utils.NewID()
+		aspect := true
+		objects[objectID] = TheaterObjectSnapshot{
+			ID: objectID, Kind: "effect", Name: name,
+			X: 960, Y: 540, Width: float64(target.Width), Height: float64(target.Height),
+			Scale: 1, ScaleX: 1, ScaleY: 1, Z: float64(index), OrderKey: strconv.Itoa(index + 1),
+			// Source active/playTime are retained as metadata, not restored playback
+			// or trigger permissions. Empty keywords keep imports manually triggered.
+			Visible: true, Locked: false, AspectRatioLocked: &aspect, Interactive: true, Editable: false,
+			Content: content, Actions: json.RawMessage(`[]`), Metadata: metadata,
+		}
+	}
+	return objects, warnings, nil
+}
+
 type ccfoliaActionConversion struct {
 	Actions  json.RawMessage
 	Metadata map[string]any
@@ -1831,6 +1963,10 @@ func ccfoliaImageRef(sourceRef *string, alt, worldID string, targets map[string]
 	if !ok {
 		return nil, fmt.Errorf("引用资源不存在: %s", ref)
 	}
+	return ccfoliaImageTargetRef(target, alt, worldID), nil
+}
+
+func ccfoliaImageTargetRef(target ccfoliaAssetTarget, alt, worldID string) map[string]any {
 	contentPath := fmt.Sprintf("/api/v1/worlds/%s/theater/resources/%s/content", url.PathEscape(worldID), url.PathEscape(target.ResourceID))
 	if target.PlaybackVariant != "" {
 		contentPath = fmt.Sprintf("/api/v1/worlds/%s/theater/resources/%s/variants/%s/content", url.PathEscape(worldID), url.PathEscape(target.ResourceID), url.PathEscape(target.PlaybackVariant))
@@ -1849,7 +1985,7 @@ func ccfoliaImageRef(sourceRef *string, alt, worldID string, targets map[string]
 	if target.LoopCount != nil {
 		result["loopCount"] = *target.LoopCount
 	}
-	return result, nil
+	return result
 }
 
 func ccfoliaUnsupportedEntityNames(values map[string]json.RawMessage) []string {
@@ -1916,6 +2052,9 @@ func ccfoliaAssetReferences(backup ccfoliaBackup) map[string][]string {
 	addItems(backup.Entities.Items, "entities.items")
 	addCharacters(backup.Entities.Characters, "entities.characters")
 	addNotes(backup.Entities.Notes, "entities.notes")
+	for effectID, effect := range backup.Entities.Effects {
+		add(effect.ImageURL, "entities.effects."+effectID+".imageUrl")
+	}
 	for savedataID, savedata := range backup.Entities.Savedatas {
 		add(savedata.Thumbnail, "entities.savedatas."+savedataID+".thumbnail")
 	}
