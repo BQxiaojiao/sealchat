@@ -717,12 +717,16 @@ const handleCCFOLIAInput = (event: Event) => {
   const file = input.files?.[0]
   input.value = ''
   if (!file) return
+  void importCCFOLIAPackageFile(file)
+}
+
+const confirmCCFOLIAImport = () => {
   packageDialog.warning({
-    title: '导入 CCFOLIA 房间',
-    content: `将“${file.name}”转换为小剧场场景并追加到当前世界。现有场景不会被覆盖。`,
-    positiveText: '开始导入',
+    title: '确认 CCFOLIA 导入权限',
+    content: '请确认：你仅导入有权复制、转换和在 SealChat 中使用的内容。导入内容将转换为小剧场场景并追加到当前世界，现有场景不会被覆盖。',
+    positiveText: '确认并选择文件',
     negativeText: '取消',
-    onPositiveClick: () => { void importCCFOLIAPackageFile(file) },
+    onPositiveClick: () => { ccfoliaInputRef.value?.click() },
   })
 }
 
@@ -731,7 +735,7 @@ const handlePackageMenuSelect = (key: string | number) => {
   if (key === 'export') void exportTheaterPackage()
   if (key === 'export-effects') void exportTheaterPackage('effects')
   if (key === 'import') packageInputRef.value?.click()
-  if (key === 'import-ccfolia') ccfoliaInputRef.value?.click()
+  if (key === 'import-ccfolia') confirmCCFOLIAImport()
 }
 
 const unlockTheaterAudio = () => {
