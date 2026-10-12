@@ -351,9 +351,10 @@ func autoMigrateTheaterModels(conn *gorm.DB) error {
 	if err := conn.AutoMigrate(theaterModels()...); err != nil {
 		return err
 	}
-	if err := ensureTheaterAppearanceSharedMappingIndex(conn); err != nil {
-		return err
-	}
+	return ensureTheaterAppearanceSharedMappingIndex(conn)
+}
+
+func migrateTheaterLegacyFields(conn *gorm.DB) error {
 	if err := conn.Exec("UPDATE theater_rooms SET scope_type = ? WHERE scope_type IS NULL OR scope_type = ''", TheaterScopeChannel).Error; err != nil {
 		return err
 	}

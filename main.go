@@ -172,13 +172,23 @@ func main() {
 	defer cancel()
 
 	model.DBInit(config)
-	if summary, err := service.RepairTheaterStateJSON(); err != nil {
+	if err := model.RunSchemaMigration(model.GetDB(), "theater_state_json_repair_v1", func() error {
+		summary, err := service.RepairTheaterStateJSON()
+		if err != nil {
+			return err
+		}
+		if summary.Rooms > 0 || summary.Scenes > 0 || summary.Snapshots > 0 || summary.InvalidJSON > 0 {
+			log.Printf("Theater 状态 JSON 修复结果: rooms=%d scenes=%d snapshots=%d fieldsRemoved=%d invalidJSON=%d", summary.Rooms, summary.Scenes, summary.Snapshots, summary.FieldsRemoved, summary.InvalidJSON)
+		}
+		if summary.InvalidJSON > 0 {
+			return fmt.Errorf("仍有 %d 条 Theater 状态 JSON 无法解析，迁移未标记完成", summary.InvalidJSON)
+		}
+		return nil
+	}); err != nil {
 		log.Printf("修复 Theater 状态 JSON 失败: %v", err)
-	} else if summary.Rooms > 0 || summary.Scenes > 0 || summary.Snapshots > 0 || summary.InvalidJSON > 0 {
-		log.Printf("修复 Theater 状态 JSON 完成: rooms=%d scenes=%d snapshots=%d fieldsRemoved=%d invalidJSON=%d", summary.Rooms, summary.Scenes, summary.Snapshots, summary.FieldsRemoved, summary.InvalidJSON)
 	}
 	service.StartChannelIFormStorageGCWorker(ctx)
-	if err := service.MergeAllTheaterRoomsToWorld(); err != nil {
+	if err := model.RunSchemaMigration(model.GetDB(), "theater_world_scope_merge_v1", service.MergeAllTheaterRoomsToWorld); err != nil {
 		log.Printf("合并世界级 Theater 数据失败: %v", err)
 	}
 	if configInit.ShouldSync {

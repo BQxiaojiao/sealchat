@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -259,7 +260,7 @@ func BackfillWorldData() error {
 		return nil
 	}
 	if !db.Migrator().HasTable(&WorldModel{}) {
-		return nil
+		return errors.New("worlds table missing before world data backfill")
 	}
 	// 只在首次升级时继承平台设置，后续启动不得覆盖世界已保存的值。
 	if err := db.Model(&WorldModel{}).
@@ -319,24 +320,33 @@ func BackfillWorldData() error {
 		Update("world_id", world.ID).Error; err != nil {
 		return err
 	}
-	_ = db.Model(&ChannelModel{}).
+	if err := db.Model(&ChannelModel{}).
 		Where("status = '' OR status IS NULL").
-		Update("status", "active")
-	_ = db.Model(&WorldModel{}).
+		Update("status", "active").Error; err != nil {
+		return err
+	}
+	if err := db.Model(&WorldModel{}).
 		Where("channel_default_dice_mode = '' OR channel_default_dice_mode IS NULL").
-		Update("channel_default_dice_mode", WorldChannelDefaultDiceModeBuiltin)
-	_ = db.Model(&WorldModel{}).
+		Update("channel_default_dice_mode", WorldChannelDefaultDiceModeBuiltin).Error; err != nil {
+		return err
+	}
+	if err := db.Model(&WorldModel{}).
 		Where("audio_library_mode = '' OR audio_library_mode IS NULL").
-		Update("audio_library_mode", "database")
+		Update("audio_library_mode", "database").Error; err != nil {
+		return err
+	}
 
 	// 如果默认世界没有默认频道记录，尝试写入一个已有频道
 	if strings.TrimSpace(world.DefaultChannelID) == "" {
 		var ch ChannelModel
-		if err := db.Where("world_id = ?", world.ID).Order("created_at asc").Limit(1).Find(&ch).Error; err == nil {
-			if ch.ID != "" {
-				_ = db.Model(&WorldModel{}).
-					Where("id = ?", world.ID).
-					Update("default_channel_id", ch.ID).Error
+		if err := db.Where("world_id = ?", world.ID).Order("created_at asc").Limit(1).Find(&ch).Error; err != nil {
+			return err
+		}
+		if ch.ID != "" {
+			if err := db.Model(&WorldModel{}).
+				Where("id = ?", world.ID).
+				Update("default_channel_id", ch.ID).Error; err != nil {
+				return err
 			}
 		}
 	}
