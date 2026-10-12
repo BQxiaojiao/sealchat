@@ -65,6 +65,12 @@ func DBInit(cfg *utils.AppConfig) {
 	if cfg == nil {
 		panic("配置不可为空")
 	}
+	dbInitStartedAt := time.Now()
+	phaseStartedAt := dbInitStartedAt
+	logPhase := func(name string) {
+		log.Printf("[数据库] DBInit 阶段完成: %s，用时 %s", name, time.Since(phaseStartedAt))
+		phaseStartedAt = time.Now()
+	}
 	dsn := cfg.DSN
 	resetSQLiteFTSState()
 	resetPostgresFTSState()
@@ -115,6 +121,7 @@ func DBInit(cfg *utils.AppConfig) {
 		applySQLiteConnPool(db, sqliteCfg)
 		ensureSQLiteAutoVacuum(db)
 	}
+	logPhase("连接与基础配置")
 
 	if err := EnsureSchemaMigrationTable(db); err != nil {
 		panic(fmt.Sprintf("初始化数据库迁移记录表失败: %v", err))
@@ -132,6 +139,7 @@ func DBInit(cfg *utils.AppConfig) {
 	if err := migrateMessageQuoteConstraint(db); err != nil {
 		log.Printf("清理消息 quote 外键失败: %v", err)
 	}
+	logPhase("迁移记录与前置修复")
 
 	db.AutoMigrate(&ChannelModel{})
 	db.AutoMigrate(&GuildModel{})
@@ -201,6 +209,7 @@ func DBInit(cfg *utils.AppConfig) {
 	db.AutoMigrate(&AIUserQuotaOverrideModel{})
 	db.AutoMigrate(&PlatformFontAsset{})
 	db.AutoMigrate(&DiceMacroModel{})
+	logPhase("核心模型迁移")
 
 	db.AutoMigrate(&SystemRoleModel{}, &ChannelRoleModel{}, &RolePermissionModel{}, &UserRoleMappingModel{})
 	db.AutoMigrate(&FriendModel{}, &FriendRequestModel{})
@@ -229,6 +238,7 @@ func DBInit(cfg *utils.AppConfig) {
 	db.AutoMigrate(&UserPreferenceModel{})
 	db.AutoMigrate(&UserAIProviderProfileModel{})
 	db.AutoMigrate(&ExportColorProfileModel{})
+	logPhase("业务模型迁移")
 	if err := ensureChatHistoryIndexes(); err != nil {
 		log.Printf("初始化聊天历史索引失败: %v", err)
 	}
@@ -260,6 +270,7 @@ func DBInit(cfg *utils.AppConfig) {
 	if err := RunSchemaMigration(db, "bot_kind_backfill_v1", BackfillBotKinds); err != nil {
 		log.Printf("回填 bot_kind 失败: %v", err)
 	}
+	logPhase("索引与历史回填")
 
 	if IsSQLite() {
 		go func() {
@@ -275,6 +286,7 @@ func DBInit(cfg *utils.AppConfig) {
 			}
 		}()
 	}
+	log.Printf("[数据库] DBInit 完成，总用时 %s", time.Since(dbInitStartedAt))
 }
 
 func migrateMessageQuoteConstraint(conn *gorm.DB) error {
