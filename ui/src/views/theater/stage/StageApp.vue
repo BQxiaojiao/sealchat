@@ -4834,7 +4834,7 @@ const fetchStageMediaBlob = (url: string, force = false) => {
       if (blob.size === 0) throw new Error('资源响应为空')
       return cacheStageMediaBlob(url, blob)
     }
-    const response = await api.get<Blob>(requestUrl, { responseType: 'blob' })
+    const response = await api.get<Blob>(requestUrl, { responseType: 'blob', timeout: 80_000 })
     if (!(response.data instanceof Blob) || response.data.size === 0) throw new Error('资源响应为空')
     return cacheStageMediaBlob(url, response.data)
   })().finally(() => {
