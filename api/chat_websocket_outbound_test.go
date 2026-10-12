@@ -84,11 +84,20 @@ func (s *recordingWSOutboundSocket) decodedStrings(t *testing.T) []string {
 	return values
 }
 
+type panickingWSOutboundSocket struct {
+	*recordingWSOutboundSocket
+}
+
+func (s *panickingWSOutboundSocket) WriteMessage(int, []byte) error {
+	panic("test websocket WriteMessage panic")
+}
+
 func newTestWsSyncConn(socket wsOutboundSocket, queueSize int) *WsSyncConn {
 	c := &WsSyncConn{
 		outbound:            make(chan wsOutboundMessage, queueSize),
 		interactiveOutbound: make(chan wsOutboundMessage, wsInteractiveQueueSize),
 		done:                make(chan struct{}),
+		closeDone:           make(chan struct{}),
 		outboundSocket:      socket,
 		coalesced:           make(map[string]wsCoalescedEntry),
 		coalescedWake:       make(chan struct{}, 1),
@@ -398,12 +407,39 @@ func TestWsSyncConnMessageCreateResponseQueueFullClosesAndCounts(t *testing.T) {
 }
 
 func TestWsSyncConnCloseIsIdempotent(t *testing.T) {
-	c := &WsSyncConn{done: make(chan struct{})}
-	if err := c.Close(); err != nil {
-		t.Fatalf("first close: %v", err)
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			socket := &recordingWSOutboundSocket{closeCalled: make(chan struct{}, 2)}
+			c := &WsSyncConn{done: make(chan struct{}), outboundSocket: socket}
+			if !legacy {
+				c.closeDone = make(chan struct{})
+			}
+			finished := make(chan error, 1)
+			go func() {
+				for _, closeConn := range []func() error{c.Close, c.Close, c.CloseAndWait, c.CloseAndWait} {
+					if err := closeConn(); err != nil {
+						finished <- err
+						return
+					}
+				}
+				finished <- nil
+			}()
+			select {
+			case err := <-finished:
+				if err != nil {
+					t.Fatalf("close: %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("repeated close did not return")
+			}
+			if got := len(socket.closeCalled); got != 1 {
+				t.Fatalf("socket close count = %d, want 1", got)
+			}
+		})
 	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("second close: %v", err)
+	var c *WsSyncConn
+	if err := c.CloseAndWait(); err != nil {
+		t.Fatalf("nil close and wait: %v", err)
 	}
 }
 
@@ -486,6 +522,88 @@ func TestWsSyncConnCloseWaitsForActiveWriteBeforeClosingSocket(t *testing.T) {
 	socket.mu.Unlock()
 	if closedDuringWrite {
 		t.Fatal("socket Close overlapped active WriteMessage")
+	}
+}
+
+func TestWsSyncConnCloseAndWaitWaitsForActiveOutboundWrite(t *testing.T) {
+	block := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(block) }) }
+	socket := &recordingWSOutboundSocket{
+		entered:     make(chan struct{}, 1),
+		block:       block,
+		closeCalled: make(chan struct{}, 1),
+	}
+	c := newTestWsSyncConn(socket, 1)
+	t.Cleanup(func() { _ = c.Close(); release() })
+	if err := c.EnqueueJSON("blocked"); err != nil {
+		t.Fatal(err)
+	}
+	waitForWrites(t, socket.entered, 1)
+
+	handlerReturned := make(chan error, 1)
+	go func() { handlerReturned <- c.CloseAndWait() }()
+	select {
+	case <-c.done:
+	case <-time.After(time.Second):
+		t.Fatal("connection was not logically closed")
+	}
+	select {
+	case <-handlerReturned:
+		t.Fatal("handler could return while WriteMessage was active")
+	case <-socket.closeCalled:
+		t.Fatal("socket closed while WriteMessage was active")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case <-socket.closeCalled:
+	case <-time.After(time.Second):
+		t.Fatal("socket was not closed after active write finished")
+	}
+	select {
+	case err := <-handlerReturned:
+		if err != nil {
+			t.Fatalf("close and wait: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler did not return after socket close")
+	}
+	socket.mu.Lock()
+	writeActive, closedDuringWrite := socket.writeActive, socket.closedDuringWrite
+	socket.mu.Unlock()
+	if writeActive || closedDuringWrite {
+		t.Fatal("handler return or socket Close overlapped active WriteMessage")
+	}
+}
+
+func TestWsSyncConnOutboundPanicClosesConnection(t *testing.T) {
+	socket := &panickingWSOutboundSocket{&recordingWSOutboundSocket{closeCalled: make(chan struct{}, 1)}}
+	c := newTestWsSyncConn(socket, 1)
+	defer c.Close()
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- c.WriteJSON("panic") }()
+	select {
+	case err := <-writeDone:
+		if !errors.Is(err, errWSConnectionClosed) {
+			t.Fatalf("write error = %v, want connection closed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("panic did not release synchronous write")
+	}
+	select {
+	case <-c.closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("panic did not release write lock and close socket")
+	}
+	select {
+	case <-socket.closeCalled:
+	default:
+		t.Fatal("socket was not closed after panic")
+	}
+	if err := c.EnqueueJSON("after panic"); !errors.Is(err, errWSConnectionClosed) {
+		t.Fatalf("enqueue after panic = %v, want connection closed", err)
 	}
 }
 
