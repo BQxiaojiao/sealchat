@@ -12,7 +12,6 @@ import {
 } from '@/composables/useTheaterAppearanceAssets'
 import {
   MAX_THEATER_PORTRAIT_DECORATIONS,
-  createDefaultTheaterTransform,
   normalizeTheaterTransform,
   theaterPresentationPatchSchema,
   theaterPresentationSchema,
@@ -24,11 +23,16 @@ import {
 } from '@/types/theaterPresentation'
 import {
   createTheaterPresentationEditorState,
+  createMultiplayerTheaterPresentationDraft,
+  buildMultiplayerTheaterPresentationApply,
   createTheaterVisualLayer,
+  type MultiplayerTheaterPresentationApply,
   type TheaterEditorCommand,
 } from './theaterPresentationEditorState'
 import TheaterPresentationInspector from './TheaterPresentationInspector.vue'
 import TheaterPresentationPreview from './TheaterPresentationPreview.vue'
+import { canUploadTheaterAppearancePurpose } from './theaterAppearanceAssetState'
+import { resolveMultiplayerPortraitMediaFx } from './theaterPresentationMedia'
 import type { DialogueControllerTemplate } from '@/views/theater/dialogue/theater-dialogue-controller'
 
 const props = withDefaults(defineProps<{
@@ -62,7 +66,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   'update:show': [show: boolean]
   apply: [value: TheaterPresentation | TheaterPresentationPatch]
-  applyMultiplayer: [transform: TheaterPresentation['multiplayerPortraitTransform']]
+  applyMultiplayer: [value: MultiplayerTheaterPresentationApply]
   setWorldTemplate: [sections: WorldTheaterPresentationTemplateSection[], presentation: TheaterPresentation]
   applyController: [template: DialogueControllerTemplate]
   toggleEditorMode: []
@@ -71,35 +75,15 @@ const emit = defineEmits<{
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const editorPresentation = () => {
   if (props.mode !== 'multiplayer' || !props.controllerTemplate) return props.presentation
-  const presentation = clone(props.controllerTemplate.presentation)
-  delete presentation.multiplayerPortraitTransform
-  if (props.presentation?.portrait) {
-    const portraitStyle = props.controllerTemplate.portraitStyle
-    // Residents render the public style's Media FX, so the preview shows it too.
-    const { mediaFx: _personalMediaFx, ...portrait } = clone(props.presentation.portrait)
-    const mediaFx = compactMediaFxSpec(portraitStyle.mediaFx)
-    presentation.portrait = {
-      ...portrait,
-      enabled: portraitStyle.enabled,
-      transform: createDefaultTheaterTransform(),
-      fit: portraitStyle.fit,
-      playbackRate: portraitStyle.playbackRate,
-      blendMode: portraitStyle.blendMode,
-      fadeDurationMs: portraitStyle.fadeDurationMs,
-      ...(mediaFx ? { mediaFx } : {}),
-    }
-  } else {
-    presentation.portrait = null
-  }
-  return theaterPresentationSchema.parse(presentation)
+  return createMultiplayerTheaterPresentationDraft({
+    presentation: props.presentation,
+    worldTemplate: props.worldTemplate,
+    fallbackTransform: props.controllerTemplate.portraitStyle.transform,
+  })
 }
 const editablePortraitStyle = () => {
-  if (!props.controllerTemplate || (props.mode !== 'controller' && props.mode !== 'multiplayer')) return null
-  const style = clone(props.controllerTemplate.portraitStyle)
-  if (props.mode === 'multiplayer') {
-    style.transform = clone(props.presentation?.multiplayerPortraitTransform || props.controllerTemplate.portraitStyle.transform)
-  }
-  return style
+  if (!props.controllerTemplate || props.mode !== 'controller') return null
+  return clone(props.controllerTemplate.portraitStyle)
 }
 
 const editor = useTheaterPresentationEditor({
@@ -112,6 +96,20 @@ const editor = useTheaterPresentationEditor({
 const activeTab = ref<'portrait' | 'speaker' | 'content' | 'decorations' | 'dialogue'>('portrait')
 type ControllerStyle = DialogueControllerTemplate['portraitStyle']
 const controllerStyle = ref<ControllerStyle | null>(editablePortraitStyle())
+const multiplayerTransform = computed(() => editor.draft.value.multiplayerPortraitTransform)
+// Public dialogue/decorations provide preview context only; they never enter the save draft.
+const previewDraft = computed(() => {
+  const draft = editor.draft.value
+  if (props.mode !== 'multiplayer' || !props.controllerTemplate) return draft
+  const portrait = draft.portrait
+  const mediaFx = resolveMultiplayerPortraitMediaFx(portrait?.mediaFx, props.controllerTemplate.portraitStyle.mediaFx)
+  return {
+    ...draft,
+    dialogue: props.controllerTemplate.presentation.dialogue,
+    portraitDecorations: props.controllerTemplate.presentation.portraitDecorations,
+    portrait: portrait && mediaFx ? { ...portrait, mediaFx } : portrait,
+  }
+})
 // One history for the whole controller portrait style (transform and Media FX), so
 // both kinds of edits undo in order instead of competing in separate stacks.
 type ControllerStyleHistory = {
@@ -167,7 +165,7 @@ const restoreControllerStyle = (snapshot: ControllerStyle, current: ControllerSt
   transform: normalizeControllerTransform(snapshot.transform, current.transform),
 })
 const controllerStyleHistoryActive = computed(() => (
-  (props.mode === 'controller' || props.mode === 'multiplayer') && activeTab.value === 'portrait'
+  props.mode === 'controller' && activeTab.value === 'portrait'
 ))
 const beginEditTransaction = () => {
   if (!controllerStyleHistoryActive.value) {
@@ -241,6 +239,7 @@ const externalPreview = typeof window !== 'undefined'
 const fileInput = ref<HTMLInputElement | null>(null)
 const uploadPurpose = ref<TheaterAppearanceAsset['purpose']>('portrait')
 const uploadAsset = ref<TheaterAppearanceAsset | null>(null)
+const uploadPending = ref(false)
 const uploadErrorCode = ref('')
 let uploadGeneration = 0
 let previewId = ''
@@ -248,26 +247,30 @@ let previewStarted = false
 
 const postPreviewMessage = (type: 'start' | 'update' | 'stop') => {
   if (!externalPreview || !previewId) return
-  window.parent.postMessage({
+  // Vue props/computed values may contain readonly/reactive Proxy arrays. postMessage uses
+  // structured clone, which cannot clone those Proxies, so normalize the whole bridge
+  // payload to the same plain JSON shape used by persisted theater presentation data.
+  const payload = clone({
     type: `sealchat.theater.appearance-preview.${type}`,
     previewId,
-    draft: type === 'stop' ? undefined : editor.draft.value,
+    draft: type === 'stop' ? undefined : previewDraft.value,
     selection: type === 'stop' ? undefined : editor.selection.value,
     activeSection: type === 'stop' ? undefined : activeTab.value === 'decorations' ? 'decorations' : activeTab.value,
     controllerArea: type === 'stop'
       ? undefined
       : props.mode === 'controller' && controllerStyle.value
-        ? { ...controllerStyle.value.transform }
+        ? controllerStyle.value.transform
         : undefined,
     controllerPortraitStyle: type === 'stop' || props.mode !== 'controller' || !controllerStyle.value
       ? undefined
-      : clone(controllerStyle.value),
-    multiplayerPortraitTransform: type === 'stop' || props.mode !== 'multiplayer' || !controllerStyle.value
+      : controllerStyle.value,
+    multiplayerPortraitTransform: type === 'stop' || props.mode !== 'multiplayer' || !multiplayerTransform.value
       ? undefined
-      : { ...controllerStyle.value.transform },
+      : multiplayerTransform.value,
     previewName: props.previewName || '角色名',
     previewText: '夜色正好，我们该出发了。',
-  }, window.location.origin)
+  })
+  window.parent.postMessage(payload, window.location.origin)
 }
 
 const stopExternalPreview = () => {
@@ -276,11 +279,21 @@ const stopExternalPreview = () => {
   previewStarted = false
 }
 
-watch(() => [props.show, props.mode] as const, ([show]) => {
+watch(() => [props.show, props.mode] as const, ([show, mode], previous) => {
   commitEditTransaction()
   uploadGeneration += 1
   resetControllerStyleHistory()
   if (!show) return
+  // Switching character layouts keeps the same visual draft, including unapplied FX.
+  if (previous?.[0] && (previous[1] === 'base' || previous[1] === 'multiplayer')
+    && (mode === 'base' || mode === 'multiplayer')) {
+    if (mode === 'multiplayer' && !multiplayerTransform.value && props.controllerTemplate) {
+      editor.dispatch({ type: 'set-multiplayer-transform', transform: clone(props.controllerTemplate.portraitStyle.transform) })
+    }
+    activeTab.value = 'portrait'
+    editor.dispatch({ type: 'select', target: { kind: 'portrait' } })
+    return
+  }
   previewId = `appearance-preview-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   previewStarted = false
   editor.state.value = createTheaterPresentationEditorState({
@@ -294,6 +307,7 @@ watch(() => [props.show, props.mode] as const, ([show]) => {
   controllerStyle.value = editablePortraitStyle()
   previewEnabled.value = true
   uploadAsset.value = null
+  uploadPending.value = false
   uploadErrorCode.value = ''
 }, { immediate: true })
 
@@ -334,7 +348,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('message', handlePreviewCommand)
 })
 
-const uploading = computed(() => uploadAsset.value?.status === 'pending' || uploadAsset.value?.status === 'processing')
+const uploading = computed(() => uploadPending.value || uploadAsset.value?.status === 'pending' || uploadAsset.value?.status === 'processing')
 const canApply = computed(() => !uploading.value)
 const canUpload = computed(() => Boolean(props.channelId && props.identityId))
 
@@ -352,8 +366,8 @@ const selectTab = (tab: 'portrait' | 'speaker' | 'content' | 'decorations' | 'di
 }
 
 const triggerUpload = (purpose: TheaterAppearanceAsset['purpose']) => {
-  if ((props.mode === 'controller' || props.mode === 'multiplayer') && purpose === 'portrait') return
-  if (!canUpload.value || uploading.value) return
+  if (!canUploadTheaterAppearancePurpose(props.mode, purpose)) return
+  if (!canUpload.value || uploading.value || props.applying) return
   uploadPurpose.value = purpose
   fileInput.value?.click()
 }
@@ -419,10 +433,11 @@ const handleFile = async (event: Event) => {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   input.value = ''
-  if (!file || !canUpload.value) return
+  if (!file || !canUpload.value || uploading.value || props.applying) return
   uploadErrorCode.value = ''
+  const generation = uploadGeneration
+  uploadPending.value = true
   try {
-    const generation = uploadGeneration
     const preparedFile = await prepareAppearanceFile(file)
     const initial = await uploadTheaterAppearanceAsset({
       channelId: props.channelId,
@@ -439,8 +454,11 @@ const handleFile = async (event: Event) => {
     if (ready.status === 'ready') applyReadyMedia(ready)
     if (ready.status === 'failed') uploadErrorCode.value = ready.failureCode || 'ASSET_PROCESSING_FAILED'
   } catch (error) {
+    if (generation !== uploadGeneration || !props.show) return
     uploadErrorCode.value = getTheaterAssetErrorCode(error)
     uploadAsset.value = null
+  } finally {
+    if (generation === uploadGeneration) uploadPending.value = false
   }
 }
 
@@ -453,9 +471,18 @@ const dispatch = (command: TheaterEditorCommand, options?: { transient?: boolean
     if (command.target.kind === 'content') activeTab.value = 'content'
     if (command.target.kind === 'dialogue' || command.target.kind === 'dialogue-frame') activeTab.value = 'dialogue'
   }
-  if ((props.mode === 'controller' || props.mode === 'multiplayer') && command.type === 'set-transform' && command.target.kind === 'portrait' && controllerStyle.value) {
-    setControllerTransform(command.transform)
-    return
+  if (command.type === 'set-transform' && command.target.kind === 'portrait') {
+    if (props.mode === 'controller' && controllerStyle.value) {
+      setControllerTransform(command.transform)
+      return
+    }
+    if (props.mode === 'multiplayer' && multiplayerTransform.value) {
+      editor.dispatch({
+        type: 'set-multiplayer-transform',
+        transform: normalizeControllerTransform(command.transform, multiplayerTransform.value),
+      }, options)
+      return
+    }
   }
   editor.dispatch(command, options)
 }
@@ -474,12 +501,13 @@ const close = () => {
 }
 const apply = () => {
   if (!canApply.value || props.applying) return
+  commitEditTransaction()
   if (props.mode === 'controller' && controllerStyle.value) {
     emit('applyController', { presentation: { ...theaterPresentationSchema.parse(editor.result.value), portrait: null }, portraitStyle: JSON.parse(JSON.stringify(controllerStyle.value)) })
     return
   }
-  if (props.mode === 'multiplayer' && controllerStyle.value) {
-    emit('applyMultiplayer', clone(controllerStyle.value.transform))
+  if (props.mode === 'multiplayer') {
+    emit('applyMultiplayer', buildMultiplayerTheaterPresentationApply(editor.draft.value))
     return
   }
   const result = props.mode === 'variant'
@@ -501,7 +529,7 @@ const setWorldTemplate = () => {
         <div>
           <div class="theater-editor-modal__title-row">
             <div class="theater-editor-modal__title">小剧场演出外观</div>
-            <n-button v-if="controllerTemplate && (mode === 'base' || mode === 'multiplayer')" size="tiny" :type="mode === 'multiplayer' ? 'primary' : 'default'" secondary @click="emit('toggleEditorMode')">
+            <n-button v-if="controllerTemplate && (mode === 'base' || mode === 'multiplayer')" size="tiny" :disabled="applying || uploading" :type="mode === 'multiplayer' ? 'primary' : 'default'" secondary @click="emit('toggleEditorMode')">
               <template #icon><n-icon><component :is="mode === 'multiplayer' ? Users : User" /></n-icon></template>
               {{ mode === 'multiplayer' ? '多人' : '单人' }}
             </n-button>
@@ -549,21 +577,21 @@ const setWorldTemplate = () => {
       <div class="theater-editor-modal__workspace">
         <main class="theater-editor-modal__preview">
           <TheaterPresentationPreview
-            :draft="editor.draft.value"
+            :draft="previewDraft"
             :selection="editor.selection.value"
             :active-section="activeTab === 'decorations' ? 'decorations' : activeTab"
             :preview-enabled="previewEnabled"
             :preview-name="previewName"
             :controller-area="mode === 'controller' ? controllerStyle?.transform : undefined"
             :controller-portrait-style="mode === 'controller' ? controllerStyle || undefined : undefined"
-            :multiplayer-portrait-transform="mode === 'multiplayer' ? controllerStyle?.transform : undefined"
+            :multiplayer-portrait-transform="mode === 'multiplayer' ? multiplayerTransform : undefined"
             @dispatch="dispatch"
             @gesture-start="beginEditTransaction"
             @gesture-end="commitEditTransaction"
           />
           <div class="theater-editor-modal__asset-row">
-            <n-button v-if="activeTab === 'portrait' && mode !== 'controller' && mode !== 'multiplayer'" size="small" :disabled="!canUpload || uploading" @click="triggerUpload('portrait')"><template #icon><n-icon><Photo /></n-icon></template>上传立绘</n-button>
-            <span v-if="mode === 'multiplayer'" class="theater-editor-modal__hint">公共样式只读，仅调整当前立绘</span>
+            <n-button v-if="activeTab === 'portrait' && canUploadTheaterAppearancePurpose(mode, 'portrait')" size="small" :disabled="!canUpload || uploading || applying" @click="triggerUpload('portrait')"><template #icon><n-icon><Photo /></n-icon></template>上传立绘</n-button>
+            <span v-if="mode === 'multiplayer'" class="theater-editor-modal__hint">角色视觉效果共用，多人布局独立保存</span>
             <n-button v-if="activeTab === 'decorations'" size="small" :disabled="!canUpload || uploading || editor.draft.value.portraitDecorations.length >= MAX_THEATER_PORTRAIT_DECORATIONS" @click="triggerUpload('portrait-decoration')"><template #icon><n-icon><Plus /></n-icon></template>添加装饰</n-button>
             <n-button v-if="activeTab === 'dialogue'" size="small" :disabled="!canUpload || uploading" @click="triggerUpload('dialogue-frame')"><template #icon><n-icon><Photo /></n-icon></template>上传对话框</n-button>
             <span v-if="!canUpload" class="theater-editor-modal__hint">先保存频道角色，才能上传演出资源</span>
@@ -581,9 +609,10 @@ const setWorldTemplate = () => {
             :selection="editor.selection.value"
             :mode="mode === 'variant' ? 'variant' : 'base'"
             :section-modes="editor.sectionModes.value"
-            :portrait-style="mode === 'controller' || mode === 'multiplayer' ? controllerStyle : null"
+            :portrait-style="mode === 'controller' ? controllerStyle : null"
+            :portrait-transform="mode === 'multiplayer' ? multiplayerTransform : undefined"
             :portrait-auto-width="mode === 'controller' || mode === 'multiplayer'"
-            :portrait-style-readonly="mode === 'multiplayer'"
+            :show-narration="mode !== 'multiplayer'"
             @dispatch="dispatch"
             @update:portrait-style="updateControllerStyle"
             @transaction-start="beginEditTransaction"

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch, type CSSProperties } from 'vue'
 import { useMessage } from 'naive-ui'
 import TheaterMediaFxVisual from '@/components/theater-presentation/TheaterMediaFxVisual.vue'
+import { resolveMultiplayerPortraitMediaFx } from '@/components/theater-presentation/theaterPresentationMedia'
 import { useTheaterAppearanceCache } from '@/composables/useTheaterAppearanceCache'
 import { normalizeTheaterTransform, resolveTheaterTransformStyle, type TheaterPresentation, type TheaterTransform, type TheaterVisualLayer } from '@/types/theaterPresentation'
 import { DialogueResidency, dialogueActorKey, type DialogueActorReference } from './theater-dialogue-residency'
@@ -33,14 +34,17 @@ const layout = computed(() => layoutDialoguePortraits({ ...size.value,
   })),
   positions: preview.value || props.controller.positions,
 }))
-const layers = computed(() => layout.value.map(rect => ({ ...rect, resident: residents.value.residents.find(item => item.actorKey === rect.actorKey)! })))
+const layers = computed(() => layout.value.map(rect => {
+  const resident = residents.value.residents.find(item => item.actorKey === rect.actorKey)!
+  return { ...rect, resident, mediaFx: resolveMultiplayerPortraitMediaFx(resident.portrait.portrait.mediaFx, props.template.portraitStyle.mediaFx) }
+}))
 const decorationStyle = (layer: TheaterVisualLayer): CSSProperties => ({
   ...resolveTheaterTransformStyle(layer.transform),
   mixBlendMode: layer.blendMode,
 })
 // Media FX sits below .dialogue-resident so the inactive dim/grayscale filter and the
-// effect filter compose instead of overwriting each other. Residents use the public
-// controller portrait style; decorations keep their own layer effect.
+// effect filter compose instead of overwriting each other. Each resident owns its visual
+// content; only old portraits without an effect fall back to the public controller FX.
 const reducedMotion = ref(props.runtime.getSnapshot().reducedMotion)
 const refresh = () => { residents.value = residency.snapshot() }
 const playPortrait = (actor: DialogueActorReference, presentation: TheaterPresentation | null | undefined) => {
@@ -115,25 +119,40 @@ const up = async (event: PointerEvent) => {
   try { await props.savePosition(key, position) }
   catch { if (scope === `${props.worldId}:${props.channelId}`) message.error('立绘位置保存失败，已恢复确认的位置') }
 }
+const invalidateAppearance = (event: Event) => {
+  const channelId = String((event as CustomEvent<{ channelId?: string }>).detail?.channelId || '').trim()
+  const current = props.runtime.getSnapshot().queue.current?.message
+  if (!channelId || !current || channelId !== (current.sourceChannelId || props.channelId)) return
+  cache.invalidateChannel(channelId)
+  const requestEpoch = ++epoch
+  // The parent overlay also invalidates this shared cache during the same event.
+  // Resolve after all listeners finish so its invalidation cannot stale our request.
+  queueMicrotask(() => {
+    if (requestEpoch !== epoch) return
+    lastSignature = ''
+    playCurrent()
+  })
+}
 watch(() => [props.worldId, props.channelId], () => { epoch++; residency = new DialogueResidency(props.worldId); lastSignature = ''; dismissed = 0; dimensions.value = {}; endGesture(); refresh(); playCurrent() }, { flush: 'sync' })
 watch(() => [props.controller.allowList, props.controller.denyList, props.controller.maxPortraits], () => { lastSignature = ''; residency.configure(props.controller); playCurrent() }, { deep: true })
 watch(() => [props.controller.dragEnabled, props.canDrag], () => { if (!props.controller.dragEnabled || !props.canDrag) endGesture() })
 watch(() => props.controller.positions, endGesture, { deep: true })
 onMounted(() => {
   unsubscribe = props.runtime.subscribe(playCurrent)
+  window.addEventListener('sealchat:theater-appearance-invalidated', invalidateAppearance)
   observer = new ResizeObserver(entries => { endGesture(); size.value = { width: entries[0].contentRect.width, height: entries[0].contentRect.height } })
   if (root.value) observer.observe(root.value)
 })
-onBeforeUnmount(() => { epoch++; endGesture(); unsubscribe?.(); observer?.disconnect() })
+onBeforeUnmount(() => { epoch++; endGesture(); unsubscribe?.(); observer?.disconnect(); window.removeEventListener('sealchat:theater-appearance-invalidated', invalidateAppearance) })
 </script>
 
 <template>
   <div ref="root" class="dialogue-residents">
-    <div v-for="item in layers" :key="item.actorKey" class="dialogue-resident" :class="{ draggable: canDrag && controller.dragEnabled, dim: residents.currentKey !== item.actorKey && controller.inactiveStyle !== 'none', grayscale: residents.currentKey !== item.actorKey && controller.inactiveStyle === 'dim-grayscale' }"
+    <div v-for="item in layers" v-show="item.resident.portrait.portrait.enabled" :key="item.actorKey" class="dialogue-resident" :class="{ draggable: canDrag && controller.dragEnabled, dim: residents.currentKey !== item.actorKey && controller.inactiveStyle !== 'none', grayscale: residents.currentKey !== item.actorKey && controller.inactiveStyle === 'dim-grayscale' }"
       :style="{ left: `${item.x}px`, top: `${item.y}px`, width: `${item.width}px`, height: `${item.height}px`, transform: `rotate(${item.rotation}deg)`, opacity: item.opacity, zIndex: item.zIndex }"
       @pointerdown="down($event, item)" @pointermove="move" @pointerup="up" @pointercancel.stop="cancelGesture" @lostpointercapture="cancelGesture" @click.stop>
-      <div class="dialogue-resident__portrait">
-        <TheaterMediaFxVisual :key="item.resident.portrait.portrait.media.assetId" :media="item.resident.portrait.portrait.media" :media-fx="template.portraitStyle.mediaFx" :reduced-motion="reducedMotion" :playback-rate="template.portraitStyle.playbackRate"
+      <div class="dialogue-resident__portrait" :style="{ mixBlendMode: item.resident.portrait.portrait.blendMode }">
+        <TheaterMediaFxVisual :key="item.resident.portrait.portrait.media.assetId" :media="item.resident.portrait.portrait.media" :media-fx="item.mediaFx" :reduced-motion="reducedMotion" :playback-rate="item.resident.portrait.portrait.playbackRate"
           @dimensions="(width, height) => { if (width > 0 && height > 0) dimensions[item.actorKey] = width / height }" />
       </div>
       <div v-for="layer in template.presentation.portraitDecorations.filter(item => item.enabled)" :key="layer.id" class="dialogue-decoration" :style="decorationStyle(layer)"><TheaterMediaFxVisual :media="layer.media" :media-fx="layer.mediaFx" :reduced-motion="reducedMotion" :playback-rate="layer.playbackRate" /></div>
@@ -148,6 +167,5 @@ onBeforeUnmount(() => { epoch++; endGesture(); unsubscribe?.(); observer?.discon
 .dialogue-resident { transition: filter .15s; }
 .dialogue-resident.dim { filter: brightness(.5); }
 .dialogue-resident.dim.grayscale { filter: brightness(.5) grayscale(1); }
-.dialogue-resident__portrait :deep(.theater-media) { object-fit: contain !important; }
 @media (prefers-reduced-motion: reduce) { .dialogue-resident { transition: none; } }
 </style>

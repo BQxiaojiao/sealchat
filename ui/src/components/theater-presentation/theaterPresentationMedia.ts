@@ -1,8 +1,13 @@
-import { resolveMediaFxCapabilities, type MediaFxCapabilities } from '../../features/media-fx/media-fx'
+import { compactMediaFxSpec, resolveMediaFxCapabilities, type MediaFxCapabilities } from '../../features/media-fx/media-fx'
 import type { MediaFxDirectiveValue } from '../../features/media-fx/media-fx-dom'
 import type { TheaterMediaRef } from '../../types/theaterPresentation'
 
 export type TheaterMediaCandidate = { kind: 'image' | 'video'; attachmentId: string }
+
+// Older multiplayer worlds stored the effect on the public controller style.
+export const resolveMultiplayerPortraitMediaFx = (personal: unknown, legacy: unknown) => (
+  compactMediaFxSpec(personal) || compactMediaFxSpec(legacy)
+)
 
 export const resolveTheaterMediaCandidates = (
   media: TheaterMediaRef,

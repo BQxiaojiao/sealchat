@@ -140,6 +140,7 @@ import AvatarSetupPrompt from '@/components/AvatarSetupPrompt.vue'
 import AvatarEditor from '@/components/AvatarEditor.vue'
 import AvatarDecorationEditor from '@/components/avatar-decoration/AvatarDecorationEditor.vue'
 import TheaterPresentationEditorModal from '@/components/theater-presentation/TheaterPresentationEditorModal.vue'
+import type { MultiplayerTheaterPresentationApply } from '@/components/theater-presentation/theaterPresentationEditorState'
 import TheaterDialogueControllerIdentity from './components/TheaterDialogueControllerIdentity.vue'
 import { readDialogueController, type DialogueControllerTemplate } from '@/views/theater/dialogue/theater-dialogue-controller'
 import UserAvatarDecoration from '@/components/user-avatar-decoration.vue'
@@ -150,7 +151,6 @@ import {
   resolveTheaterPresentation,
   type TheaterPresentation,
   type TheaterPresentationPatch,
-  type TheaterTransform,
   type WorldTheaterPresentationTemplate,
   type WorldTheaterPresentationTemplateSection,
 } from '@/types/theaterPresentation'
@@ -5574,13 +5574,17 @@ const openIdentityVariantTheaterPresentationEditor = async () => {
 };
 
 const toggleTheaterPresentationEditorMode = () => {
-  if (!theaterPresentationControllerTemplate.value || theaterPresentationEditorMode.value === 'variant') return;
+  if (theaterPresentationApplying.value || !theaterPresentationControllerTemplate.value || theaterPresentationEditorMode.value === 'variant') return;
   theaterPresentationEditorMode.value = theaterPresentationEditorMode.value === 'multiplayer' ? 'base' : 'multiplayer';
 };
 
 const handleTheaterPresentationApply = async (value: TheaterPresentation | TheaterPresentationPatch) => {
   if (theaterPresentationApplying.value) return;
   theaterPresentationApplying.value = true;
+  const previousPresentation = cloneChannelIdentityTheaterPresentation(identityForm.theaterPresentation);
+  const applyChannelId = chat.curChannel?.id;
+  const applyIdentityId = editingIdentity.value?.id;
+  let stagedPresentation: TheaterPresentation | null = null;
   let saved = false;
   try {
     if (theaterPresentationEditorMode.value === 'variant') {
@@ -5593,6 +5597,7 @@ const handleTheaterPresentationApply = async (value: TheaterPresentation | Theat
     } else {
       const submittedPresentation = cloneChannelIdentityTheaterPresentation(value as TheaterPresentation);
       identityForm.theaterPresentation = submittedPresentation;
+      stagedPresentation = identityForm.theaterPresentation;
       if (editingIdentity.value?.sharedIdentityId && !isManagingBotIdentity.value && editingIdentity.value.id && chat.curChannel?.id) {
         try {
           const savedIdentity = await chat.sharedChannelIdentityTheaterPresentationSet(editingIdentity.value.id, {
@@ -5631,14 +5636,20 @@ const handleTheaterPresentationApply = async (value: TheaterPresentation | Theat
       theaterPresentationEditorVisible.value = false;
     }
   } finally {
+    if (!saved && theaterPresentationEditorMode.value !== 'variant'
+      && chat.curChannel?.id === applyChannelId && editingIdentity.value?.id === applyIdentityId
+      && identityForm.theaterPresentation === stagedPresentation) {
+      identityForm.theaterPresentation = previousPresentation;
+    }
     theaterPresentationApplying.value = false;
   }
 };
 
-const handleMultiplayerPortraitApply = async (transform: TheaterTransform | undefined) => {
-  const presentation = cloneChannelIdentityTheaterPresentation(identityForm.theaterPresentation)
-    || createDefaultTheaterPresentation();
-  if (transform) presentation.multiplayerPortraitTransform = JSON.parse(JSON.stringify(transform));
+const handleMultiplayerPortraitApply = async ({ presentation: draft, multiplayerPortraitTransform }: MultiplayerTheaterPresentationApply) => {
+  if (theaterPresentationApplying.value) return;
+  const presentation = cloneChannelIdentityTheaterPresentation(draft);
+  if (!presentation) return;
+  if (multiplayerPortraitTransform) presentation.multiplayerPortraitTransform = JSON.parse(JSON.stringify(multiplayerPortraitTransform));
   else delete presentation.multiplayerPortraitTransform;
   await handleTheaterPresentationApply(presentation);
 };

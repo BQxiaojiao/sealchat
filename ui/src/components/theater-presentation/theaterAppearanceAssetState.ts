@@ -23,6 +23,11 @@ export const canApplyTheaterAppearanceAsset = (asset?: TheaterAppearanceAsset | 
   asset?.status === 'ready' && Boolean(asset.media)
 )
 
+export const canUploadTheaterAppearancePurpose = (
+  mode: 'base' | 'variant' | 'controller' | 'multiplayer',
+  purpose: TheaterAppearanceAsset['purpose'],
+) => mode !== 'controller' || purpose !== 'portrait'
+
 export const buildTheaterAppearanceAssetFields = (input: {
   identityId: string
   variantId?: string
