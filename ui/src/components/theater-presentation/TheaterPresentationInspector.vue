@@ -18,8 +18,10 @@ const props = defineProps<{
   mode: 'base' | 'variant'
   sectionModes: Record<TheaterSection, TheaterSectionMode>
   portraitStyle?: TheaterVisualStyle | null
+  portraitTransform?: TheaterTransform
   portraitAutoWidth?: boolean
-  // The public controller style is read-only while adjusting one multiplayer portrait.
+  showNarration?: boolean
+  // Optional read-only public style; personal multiplayer visuals use the draft instead.
   portraitStyleReadonly?: boolean
 }>()
 const emit = defineEmits<{
@@ -45,6 +47,7 @@ const layer = computed<TheaterVisualLayer | TheaterVisualStyle | null>(() => {
   return null
 })
 const transform = computed(() => {
+  if (props.selection.kind === 'portrait' && props.portraitTransform) return props.portraitTransform
   if (props.selection.kind === 'dialogue') return props.draft.dialogue.transform
   if (props.selection.kind === 'speaker') return props.draft.dialogue.speaker.transform
   if (props.selection.kind === 'content') return props.draft.dialogue.content.transform
@@ -420,7 +423,7 @@ onMounted(() => { void refreshPlatformFonts() })
       </n-radio-group>
     </template>
 
-    <section v-if="section === 'portrait' && !portraitStyle" class="theater-inspector__narration">
+    <section v-if="section === 'portrait' && !portraitStyle && showNarration !== false" class="theater-inspector__narration">
       <div v-if="mode === 'variant'" class="theater-inspector__mode">
         <div class="theater-inspector__label">旁白模式配置</div>
         <n-radio-group

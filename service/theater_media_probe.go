@@ -180,39 +180,46 @@ func parseAPNGMetadata(path string) (theaterMediaMetadata, error) {
 	if err != nil {
 		return theaterMediaMetadata{}, err
 	}
-	if len(data) < 33 || !bytes.Contains(data, []byte("acTL")) {
+	if len(data) < 33 || !bytes.Equal(data[:8], []byte("\x89PNG\r\n\x1a\n")) {
 		return theaterMediaMetadata{}, errors.New("IMAGE_DECODE_FAILED: invalid APNG")
 	}
 	width := int(binary.BigEndian.Uint32(data[16:20]))
 	height := int(binary.BigEndian.Uint32(data[20:24]))
-	index := bytes.Index(data, []byte("acTL"))
-	frameCount := 1
-	if index >= 4 && index+8 <= len(data) {
-		frameCount = int(binary.BigEndian.Uint32(data[index+4 : index+8]))
-	}
-	duration := int64(0)
-	for offset := 0; ; {
-		index := bytes.Index(data[offset:], []byte("fcTL"))
-		if index < 0 {
-			break
+	frameCount := 0
+	var loopCount *int
+	duration := float64(0)
+	for offset := 8; offset+12 <= len(data); {
+		size := uint64(binary.BigEndian.Uint32(data[offset : offset+4]))
+		if size > uint64(len(data)-offset-12) {
+			return theaterMediaMetadata{}, errors.New("IMAGE_DECODE_FAILED: invalid APNG chunk")
 		}
-		index += offset
-		if index+26 <= len(data) {
-			numerator := binary.BigEndian.Uint16(data[index+20 : index+22])
-			denominator := binary.BigEndian.Uint16(data[index+22 : index+24])
+		chunk := data[offset+8 : offset+8+int(size)]
+		switch string(data[offset+4 : offset+8]) {
+		case "acTL":
+			if len(chunk) != 8 {
+				return theaterMediaMetadata{}, errors.New("IMAGE_DECODE_FAILED: invalid APNG animation control")
+			}
+			frameCount = int(binary.BigEndian.Uint32(chunk[:4]))
+			plays := int(binary.BigEndian.Uint32(chunk[4:8]))
+			loopCount = &plays
+		case "fcTL":
+			if len(chunk) != 26 {
+				return theaterMediaMetadata{}, errors.New("IMAGE_DECODE_FAILED: invalid APNG frame control")
+			}
+			// Frame delay follows sequence, dimensions and both frame offsets.
+			numerator := binary.BigEndian.Uint16(chunk[20:22])
+			denominator := binary.BigEndian.Uint16(chunk[22:24])
 			if denominator == 0 {
 				denominator = 100
 			}
-			duration += int64(numerator) * 1000 / int64(denominator)
+			duration += float64(numerator) * 1000 / float64(denominator)
 		}
-		offset = index + 4
+		offset += int(size) + 12
 	}
-	var loopCount *int
-	if index >= 4 && index+12 <= len(data) {
-		plays := int(binary.BigEndian.Uint32(data[index+8 : index+12]))
-		loopCount = &plays
+	if frameCount <= 0 {
+		return theaterMediaMetadata{}, errors.New("IMAGE_DECODE_FAILED: invalid APNG animation control")
 	}
-	return theaterMediaMetadata{Kind: "animated_image", MimeType: "image/apng", Width: width, Height: height, FrameCount: frameCount, DurationMS: duration, LoopCount: loopCount}, nil
+	return theaterMediaMetadata{Kind: "animated_image", MimeType: "image/apng", Width: width, Height: height, FrameCount: frameCount, DurationMS: int64(math.Round(duration)), LoopCount: loopCount}, nil
 }
 
 type theaterWebPMetadata struct {

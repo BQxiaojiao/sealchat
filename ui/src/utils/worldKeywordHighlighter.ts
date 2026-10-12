@@ -66,18 +66,11 @@ function compareKeywordPriority(left: CompiledKeywordSpan, right: CompiledKeywor
 }
 
 function compareRangePriority(
-  left: { start: number; end: number; keyword: CompiledKeywordSpan },
-  right: { start: number; end: number; keyword: CompiledKeywordSpan },
+  left: { start: number; end: number },
+  right: { start: number; end: number },
 ) {
-  const keywordPriority = compareKeywordPriority(left.keyword, right.keyword)
-  if (keywordPriority !== 0) return keywordPriority
-
-  const leftLength = left.end - left.start
-  const rightLength = right.end - right.start
-  if (leftLength !== rightLength) return rightLength - leftLength
   if (left.start !== right.start) return left.start - right.start
-  if (left.end !== right.end) return left.end - right.end
-  return 0
+  return right.end - left.end
 }
 
 function rangesOverlap(
@@ -111,7 +104,7 @@ function buildRanges(text: string, compiled: CompiledKeywordSpan[]): HighlightRa
 
   rawRanges.sort(compareRangePriority)
 
-  // Overlapping candidates now prefer configured classification priority first.
+  // Select leftmost-longest ranges; exact-range candidates retain business priority.
   const selected: HighlightRangeGroup[] = []
   rawRanges.forEach((range) => {
     const existingExactRange = selected.find((existing) => existing.start === range.start && existing.end === range.end)

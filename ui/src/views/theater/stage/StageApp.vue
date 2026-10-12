@@ -38,6 +38,7 @@ import {
   LetterT,
   Lock,
   LockOpen,
+  Marquee2,
   Message,
   Photo,
   Pencil,
@@ -123,11 +124,21 @@ import {
 } from '../shared/stage-types'
 import { stageActionSchema, type ChatCharactersSnapshotPayload, type ChatClueAccessReadResult, type ChatClueOptionsReadResult, type StageSequenceTriggeredPayload } from '../bridge/theater-bridge-protocol'
 import { syncStageObjectHierarchy } from './stage-layering'
-import { compareStageLayersBottomToTop, compareStageLayersTopToBottom, planStageObjectRenderBands } from './stage-layer-order'
+import { compareStageLayersBottomToTop, compareStageLayersTopToBottom, planStageObjectRenderBands, stageObjectHasDomVisualDescendant } from './stage-layer-order'
+import { createStageDomVisualPreview } from './stage-dom-visual-preview'
 import { buildStageLayerRows, stageLayerSelectionExpansionIds } from './stage-layer-tree'
 import { stageSelectionRootIds } from './stage-selection'
 import { stageSceneTransitionKeyframes, stageSceneTransitionOptions } from './stage-scene-transition'
 import { snapStageResizeBox, type StageGridResizeSession } from './stage-grid-resize'
+import {
+  STAGE_INSERT_CLICK_THRESHOLD_PX,
+  resolveStageInsertPlacement,
+  stageInsertPreviewRect,
+  type StageDragInsertType,
+  type StageInsertPlacementOptions,
+  type StageInsertPoint,
+  type StageInsertViewport,
+} from './stage-insert-placement'
 import {
   resolveTheaterStageMediaLocation,
   theaterResourceContentPath,
@@ -707,12 +718,16 @@ const handleCCFOLIAInput = (event: Event) => {
   const file = input.files?.[0]
   input.value = ''
   if (!file) return
+  void importCCFOLIAPackageFile(file)
+}
+
+const confirmCCFOLIAImport = () => {
   packageDialog.warning({
-    title: '导入 CCFOLIA 房间',
-    content: `将“${file.name}”转换为小剧场场景并追加到当前世界。现有场景不会被覆盖。`,
-    positiveText: '开始导入',
+    title: '确认 CCFOLIA 导入权限',
+    content: '请确认：你仅导入有权复制、转换和在 SealChat 中使用的内容。导入内容将转换为小剧场场景并追加到当前世界，现有场景不会被覆盖。',
+    positiveText: '确认并选择文件',
     negativeText: '取消',
-    onPositiveClick: () => { void importCCFOLIAPackageFile(file) },
+    onPositiveClick: () => { ccfoliaInputRef.value?.click() },
   })
 }
 
@@ -721,7 +736,7 @@ const handlePackageMenuSelect = (key: string | number) => {
   if (key === 'export') void exportTheaterPackage()
   if (key === 'export-effects') void exportTheaterPackage('effects')
   if (key === 'import') packageInputRef.value?.click()
-  if (key === 'import-ccfolia') ccfoliaInputRef.value?.click()
+  if (key === 'import-ccfolia') confirmCCFOLIAImport()
 }
 
 const unlockTheaterAudio = () => {
@@ -1275,7 +1290,8 @@ const workspaceRef = ref<HTMLDivElement | null>(null)
 const hasPermission = (permission: string) => props.syncReady && props.permissions.includes(permission)
 const canBrowseScenes = computed(() => hasPermission('stage.view'))
 const canEditAllObjects = computed(() => hasPermission('stage.object.edit'))
-const surfaceIframeInteractive = (target: StageSurfaceTarget) => (
+// The global "禁用交互" switch also overrides surface webpage testing.
+const surfaceIframeInteractive = (target: StageSurfaceTarget) => !iframeInteractionDisabled.value && (
   canEditAllObjects.value
     ? surfaceInteractionTest.value === target
     : props.store.state.liveState.surfaceEmbeds[target]?.interactive === true
@@ -2149,6 +2165,11 @@ const handleStageShortcut = (event: KeyboardEvent) => {
     || imageEditorVisible.value
   ) return
   const key = event.key.toLowerCase()
+  if (key === 'escape' && pendingInsertType.value) {
+    cancelStageInsert()
+    event.preventDefault()
+    return
+  }
   if (key === 'escape' && quickDeleteActive.value) {
     quickDeleteActive.value = false
     nextTick(updateTransformer)
@@ -2193,7 +2214,125 @@ const handleStageShortcut = (event: KeyboardEvent) => {
   if (handled) event.preventDefault()
 }
 
+// Drag-to-create for scene text/image/iframe. `dragInsertEnabled` only changes how the toolbar
+// buttons behave; `pendingInsertType` is the one-shot placement waiting for a stage drag.
+const dragInsertEnabled = ref(false)
+const pendingInsertType = ref<StageDragInsertType | null>(null)
+const insertDraft = ref<{
+  pointerId: number
+  origin: StageInsertPoint
+  viewport: StageInsertViewport
+  start: StageInsertPoint
+  current: StageInsertPoint
+} | null>(null)
+
+const cancelStageInsert = () => {
+  insertDraft.value = null
+  pendingInsertType.value = null
+}
+
+const toggleDragInsert = () => {
+  dragInsertEnabled.value = !dragInsertEnabled.value
+  if (!dragInsertEnabled.value) cancelStageInsert()
+}
+
+const requestStageObjectInsert = (type: StageDragInsertType) => {
+  if (!dragInsertEnabled.value) {
+    props.store.addObject(type)
+    return
+  }
+  if (pendingInsertType.value === type) {
+    cancelStageInsert()
+    return
+  }
+  if (viewToolActive.value) toggleViewTool()
+  else if (activeCanvasTool.value || quickDeleteActive.value) {
+    cancelDrawingSession()
+    activeCanvasTool.value = null
+    quickDeleteActive.value = false
+    nextTick(updateTransformer)
+  }
+  surfaceInteractionTest.value = null
+  insertDraft.value = null
+  pendingInsertType.value = type
+}
+
+const stageInsertOptions = (viewport: StageInsertViewport): StageInsertPlacementOptions => ({
+  viewport,
+  camera: props.store.state.camera,
+  unitPx: WORLD_UNIT_PX,
+  clickThresholdPx: STAGE_INSERT_CLICK_THRESHOLD_PX,
+  // Same floor as Transformer resizing in applyObjectNodeTransform.
+  minSizePx: 12,
+  snapWorldPx: snapStagePosition,
+  gridStepPx: gridSnapEnabled.value ? stageGridStep() : null,
+})
+
+const insertPreviewRect = computed(() => {
+  const draft = insertDraft.value
+  return draft ? stageInsertPreviewRect(draft.start, draft.current, stageInsertOptions(draft.viewport)) : null
+})
+
+const handleStageInsertPointerDown = (event: PointerEvent) => {
+  if (!pendingInsertType.value || insertDraft.value || event.button !== 0) return
+  event.preventDefault()
+  const layer = event.currentTarget as HTMLElement
+  const rect = layer.getBoundingClientRect()
+  const point = { x: event.clientX - rect.left, y: event.clientY - rect.top }
+  try {
+    layer.setPointerCapture(event.pointerId)
+  } catch {
+    // Capture is best effort; the layer still covers the whole viewport.
+  }
+  insertDraft.value = {
+    pointerId: event.pointerId,
+    origin: { x: rect.left, y: rect.top },
+    viewport: { width: rect.width, height: rect.height },
+    start: point,
+    current: point,
+  }
+}
+
+const handleStageInsertPointerMove = (event: PointerEvent) => {
+  const draft = insertDraft.value
+  if (!draft || draft.pointerId !== event.pointerId) return
+  draft.current = { x: event.clientX - draft.origin.x, y: event.clientY - draft.origin.y }
+}
+
+const handleStageInsertPointerUp = (event: PointerEvent) => {
+  const draft = insertDraft.value
+  const type = pendingInsertType.value
+  if (!draft || !type || draft.pointerId !== event.pointerId) return
+  const end = { x: event.clientX - draft.origin.x, y: event.clientY - draft.origin.y }
+  const placement = resolveStageInsertPlacement(draft.start, end, stageInsertOptions(draft.viewport))
+  cancelStageInsert()
+  if (canEditAllObjects.value) props.store.addObject(type, 'scene', placement)
+}
+
+const handleStageInsertPointerCancel = (event: PointerEvent) => {
+  if (insertDraft.value?.pointerId === event.pointerId) insertDraft.value = null
+}
+
+const handleStageInsertWheel = (event: WheelEvent) => {
+  event.preventDefault()
+  if (!stage || insertDraft.value) return
+  // The layer sits above the Konva container; keep wheel zoom while waiting for placement.
+  stage.setPointersPositions(event)
+  handleWheel({ evt: event } as Konva.KonvaEventObject<WheelEvent>)
+}
+
+watch(() => props.store.state.activeSceneId, cancelStageInsert)
+watch(surfaceInteractionTest, (target) => {
+  if (target) cancelStageInsert()
+})
+watch(canEditAllObjects, (canEdit) => {
+  if (canEdit) return
+  dragInsertEnabled.value = false
+  cancelStageInsert()
+})
+
 const selectCanvasTool = (tool: StageCanvasTool) => {
+  cancelStageInsert()
   cancelDrawingSession()
   viewToolActive.value = false
   quickDeleteActive.value = false
@@ -2219,6 +2358,7 @@ const selectCanvasTool = (tool: StageCanvasTool) => {
 
 const toggleQuickDeleteTool = () => {
   if (!canEditAllObjects.value) return
+  cancelStageInsert()
   cancelDrawingSession()
   viewToolActive.value = false
   activeCanvasTool.value = null
@@ -2229,6 +2369,7 @@ const toggleQuickDeleteTool = () => {
 }
 
 const toggleViewTool = () => {
+  cancelStageInsert()
   cancelDrawingSession()
   finishPointerTrace()
   activeCanvasTool.value = null
@@ -2902,6 +3043,14 @@ let selectionGroupDrag: {
   nodes: Map<string, { node: Konva.Group, absolute: { x: number, y: number } }>
 } | null = null
 let batchTransformRootIds: string[] | null = null
+// DOM visuals follow their Konva node during drag/transform; formal transforms commit on end.
+const domVisualPreview = createStageDomVisualPreview({
+  getNode: objectId => objectNodes.get(objectId),
+  hasDomVisual: (objectId) => {
+    const object = stageObjects.value[objectId]
+    return Boolean(object && stageObjectHasDomVisualDescendant(object, stageObjects.value))
+  },
+})
 
 const drawWorldLayers = (immediate = false) => {
   if (immediate) {
@@ -4699,7 +4848,7 @@ const fetchStageMediaBlob = (url: string, force = false) => {
       if (blob.size === 0) throw new Error('资源响应为空')
       return cacheStageMediaBlob(url, blob)
     }
-    const response = await api.get<Blob>(requestUrl, { responseType: 'blob' })
+    const response = await api.get<Blob>(requestUrl, { responseType: 'blob', timeout: 80_000 })
     if (!(response.data instanceof Blob) || response.data.size === 0) throw new Error('资源响应为空')
     return cacheStageMediaBlob(url, response.data)
   })().finally(() => {
@@ -7037,9 +7186,11 @@ const createObjectNode = (object: StageObject) => {
     setGridSnapPreview(gridSnapEnabled.value)
     props.store.beginObjectEdit('移动对象')
   })
-  wrapper.on('dragmove', () => {
+  wrapper.on('dragmove', (event) => {
     if (!multiDrag || multiDrag.driverId !== object.id) {
       snapNodeToGrid(wrapper)
+      // Drag events bubble; only the dragged node itself moved.
+      if ((event.target as Konva.Node) === wrapper) domVisualPreview.schedule([object.id])
       return
     }
     const current = wrapper.absolutePosition()
@@ -7059,6 +7210,7 @@ const createObjectNode = (object: StageObject) => {
         node.absolutePosition({ x: position.x + correction.x, y: position.y + correction.y })
       })
     }
+    domVisualPreview.schedule(multiDrag.nodes.keys())
     updateTransformer()
   })
   wrapper.on('dragend', () => {
@@ -7072,6 +7224,7 @@ const createObjectNode = (object: StageObject) => {
         current.transform.y = Number((node.y() / WORLD_UNIT_PX).toFixed(6))
       })
       props.store.commitObjectEdit()
+      domVisualPreview.clear()
       setGridSnapPreview(false)
       updateTransformer()
       return
@@ -7079,6 +7232,7 @@ const createObjectNode = (object: StageObject) => {
     const current = getObject(object.id)
     if (!canEditObject(current)) {
       props.store.cancelObjectEdit()
+      domVisualPreview.clear()
       setGridSnapPreview(false)
       return
     }
@@ -7088,6 +7242,7 @@ const createObjectNode = (object: StageObject) => {
     current.transform.x = Number((wrapper.x() / WORLD_UNIT_PX).toFixed(6))
     current.transform.y = Number((wrapper.y() / WORLD_UNIT_PX).toFixed(6))
     props.store.commitObjectEdit()
+    domVisualPreview.clear()
     setGridSnapPreview(false)
   })
   wrapper.on('dragcancel', finishGridSnapPreview)
@@ -7101,10 +7256,12 @@ const createObjectNode = (object: StageObject) => {
     const current = getObject(object.id)
     if (!canEditObject(current)) {
       props.store.cancelObjectEdit()
+      domVisualPreview.clear()
       return
     }
     applyObjectNodeTransform(wrapper, current)
     props.store.commitObjectEdit()
+    domVisualPreview.clear()
   })
   objectNodes.set(object.id, wrapper)
   return wrapper
@@ -8490,6 +8647,7 @@ onMounted(() => {
     props.store.beginObjectEdit('批量变换对象')
   })
   transformer.on('transform', () => {
+    domVisualPreview.schedule(transformer!.nodes().map(node => String(node.getAttr('stageObjectId') || '')))
     if (!batchTransformRootIds) return
     syncSelectionGroupHitArea(selectedMovementNodes().map(({ node }) => node))
     selectionGroupHitArea?.setAttrs({ visible: false, listening: false, draggable: false })
@@ -8511,6 +8669,7 @@ onMounted(() => {
     })
     if (valid) props.store.commitObjectEdit()
     else props.store.cancelObjectEdit()
+    domVisualPreview.clear()
     void nextTick(() => {
       syncObjects()
       updateTransformer()
@@ -8598,6 +8757,7 @@ onMounted(() => {
     }
     transformer?.forceUpdate()
     syncSelectionGroupHitArea([...selectionGroupDrag.nodes.values()].map(({ node }) => node))
+    domVisualPreview.schedule(selectionGroupDrag.nodes.keys())
     interactionLayer?.batchDraw()
   })
   selectionGroupHitArea.on('dragend', (event) => {
@@ -8612,6 +8772,7 @@ onMounted(() => {
       object.transform.y = Number((node.y() / WORLD_UNIT_PX).toFixed(6))
     })
     props.store.commitObjectEdit()
+    domVisualPreview.clear()
     setGridSnapPreview(false)
     void nextTick(() => {
       syncObjects()
@@ -8665,6 +8826,7 @@ onMounted(() => {
 })
 
 watch(() => props.store.state.activeSceneId, (sceneId, previousSceneId) => {
+  domVisualPreview.clear()
   hideImageAnnotation()
   closeImageAnnotationEditor()
   effectRuntime.invalidateCurrentMessage()
@@ -8765,6 +8927,7 @@ watch(() => props.syncReady, (ready, wasReady) => {
   if (ready && !wasReady) beginSceneMediaBatch(props.store.state.activeSceneId, false)
 })
 watch(() => [props.syncReady, ...props.permissions], () => {
+  domVisualPreview.clear()
   const selectedId = props.store.state.selectedObjectId
   const object = selectedId ? props.store.activeObjects.value[selectedId] : null
   if (object && !canEditObject(object)) props.store.clearSelection()
@@ -8817,6 +8980,7 @@ watch([scenePanelOpen, inspectorPanelOpen, layerPanelOpen, effectPanelOpen, sequ
   observeOpenPanels()
 })
 watch(() => [props.worldId, props.channelId], () => {
+  domVisualPreview.clear()
   if (quickToolPickerOpen.value) closeQuickToolPicker()
   if (canManageResources.value) void Promise.all([fetchTheaterAudioAssets(), fetchTheaterImageAssets()])
 })
@@ -8877,6 +9041,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('touchstart', unlockTheaterAudio, true)
   document.removeEventListener('keydown', unlockTheaterAudio, true)
   props.store.commitObjectEdit()
+  domVisualPreview.clear()
   finishGridSnapPreview()
   if (gridSyncFrame !== null) window.cancelAnimationFrame(gridSyncFrame)
   gridSyncFrame = null
@@ -9181,12 +9346,17 @@ onBeforeUnmount(() => {
         @update:sides="drawingPolygonSides = $event"
       />
       <n-button-group v-if="canEditAllObjects" class="theater-stage-object-actions" size="small">
-        <n-tooltip trigger="hover"><template #trigger><n-button @click="store.addObject('text')"><template #icon><n-icon><LetterT /></n-icon></template></n-button></template>添加文字</n-tooltip>
-        <n-tooltip trigger="hover"><template #trigger><n-button @click="store.addObject('image')"><template #icon><n-icon><Photo /></n-icon></template></n-button></template>添加图片面板</n-tooltip>
+        <n-tooltip trigger="hover"><template #trigger><n-button class="theater-insert-trigger" :class="{ 'is-active': pendingInsertType === 'text' }" @click="requestStageObjectInsert('text')"><template #icon><n-icon><LetterT /></n-icon></template></n-button></template>添加文字</n-tooltip>
+        <n-tooltip trigger="hover"><template #trigger><n-button class="theater-insert-trigger" :class="{ 'is-active': pendingInsertType === 'image' }" @click="requestStageObjectInsert('image')"><template #icon><n-icon><Photo /></n-icon></template></n-button></template>添加图片面板</n-tooltip>
         <span class="theater-iframe-trigger-group">
           <n-tooltip trigger="hover">
             <template #trigger>
-              <n-button class="theater-iframe-trigger theater-iframe-trigger--primary" aria-label="添加网页" @click="store.addObject('iframe')">
+              <n-button
+                class="theater-insert-trigger theater-iframe-trigger theater-iframe-trigger--primary"
+                :class="{ 'is-active': pendingInsertType === 'iframe' }"
+                aria-label="添加网页"
+                @click="requestStageObjectInsert('iframe')"
+              >
                 <template #icon><n-icon><World /></n-icon></template>
               </n-button>
             </template>
@@ -9203,6 +9373,21 @@ onBeforeUnmount(() => {
             </n-button>
           </n-dropdown>
         </span>
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <n-button
+              class="theater-drag-insert-toggle"
+              :class="{ 'is-active': dragInsertEnabled }"
+              :aria-pressed="dragInsertEnabled"
+              aria-label="拖拽创建"
+              @click="toggleDragInsert"
+            >
+              <template #icon><n-icon><Marquee2 /></n-icon></template>
+            </n-button>
+          </template>
+          <div>拖拽创建</div>
+          <div>开启后，创建组件时将拖拽确定位置和大小</div>
+        </n-tooltip>
       </n-button-group>
       <StageSceneFixedToolbar
         v-if="canEditAllObjects"
@@ -9349,6 +9534,7 @@ onBeforeUnmount(() => {
             :channel-id="channelId"
             :scope-type="props.scopeType || 'channel'"
             :stacking-order="rootStackingOrder"
+            :visual-transforms="domVisualPreview.transforms"
             :character-snapshot="characterSnapshot"
             @embed-event-published="triggerEmbedEventActions"
           />
@@ -9360,6 +9546,28 @@ onBeforeUnmount(() => {
             :style="imageAnnotationOverlayStyle"
           >{{ imageAnnotationOverlay.annotation.text }}</div>
           <div ref="sceneMorphContainerRef" class="theater-scene-morph-overlay" />
+        </div>
+        <div
+          v-if="pendingInsertType && canEditAllObjects"
+          class="theater-stage-insert-layer"
+          @pointerdown="handleStageInsertPointerDown"
+          @pointermove="handleStageInsertPointerMove"
+          @pointerup="handleStageInsertPointerUp"
+          @pointercancel="handleStageInsertPointerCancel"
+          @lostpointercapture="handleStageInsertPointerCancel"
+          @contextmenu.prevent.stop="cancelStageInsert"
+          @wheel="handleStageInsertWheel"
+        >
+          <div
+            v-if="insertPreviewRect"
+            class="theater-stage-insert-preview"
+            :style="{
+              left: `${insertPreviewRect.left}px`,
+              top: `${insertPreviewRect.top}px`,
+              width: `${insertPreviewRect.width}px`,
+              height: `${insertPreviewRect.height}px`,
+            }"
+          />
         </div>
         <div v-if="surfaceInteractionTest" class="theater-surface-test-exit">
           <span>正在测试{{ surfaceInteractionTest === 'background' ? '背景' : '前景' }}网页</span>
@@ -10935,6 +11143,17 @@ onBeforeUnmount(() => {
   color: #fff; background: var(--theater-accent); border-color: var(--theater-accent);
 }
 .theater-quick-delete-tool.is-active { color: #fff; background: #dc2626; border-color: #dc2626; }
+.theater-stage-object-actions :deep(.theater-drag-insert-toggle) {
+  --n-width: 14px !important;
+  --n-padding: 0 !important;
+  width: 14px;
+  min-width: 14px;
+}
+.theater-stage-object-actions :deep(.theater-drag-insert-toggle .n-icon) { font-size: 12px; }
+.theater-stage-object-actions :deep(.theater-drag-insert-toggle.is-active),
+.theater-stage-object-actions :deep(.theater-insert-trigger.is-active) {
+  color: #fff; background: var(--theater-accent); border-color: var(--theater-accent);
+}
 .theater-toolbar-divider { width: 1px; height: 22px; flex: 0 0 1px; margin: 0 2px; background: var(--theater-border); }
 .theater-bridge-status { width: 28px; min-width: 28px; height: 28px; flex: 0 0 28px; padding: 0; color: var(--sc-fg-muted, #71717a); }
 .theater-bridge-status.is-connected { color: #22c55e; }
@@ -10981,6 +11200,12 @@ onBeforeUnmount(() => {
 .theater-stage-viewport :global(.theater-scene-curtain-panel.is-right) { transform: translateX(100%); }
 .theater-appearance-preview-layer { position: absolute; z-index: 9500; inset: 0; overflow: hidden; }
 .theater-appearance-preview-layer :deep(.theater-preview) { min-height: 0; background: transparent; }
+/* Above scene visuals (canvas, text overlay, iframe objects) so a pending placement can start anywhere. */
+.theater-stage-insert-layer { position: absolute; z-index: 9400; inset: 0; overflow: hidden; cursor: crosshair; touch-action: none; user-select: none; }
+.theater-stage-insert-preview {
+  position: absolute; box-sizing: border-box; pointer-events: none;
+  border: 1px dashed #38bdf8; background: rgba(56, 189, 248, .12);
+}
 .theater-stage-viewport.is-drawing :deep(canvas) { cursor: crosshair !important; }
 .theater-stage-viewport.is-viewing :deep(canvas) { cursor: grab !important; }
 .theater-stage-viewport.is-erasing :deep(canvas) { cursor: cell !important; }

@@ -140,6 +140,7 @@ import AvatarSetupPrompt from '@/components/AvatarSetupPrompt.vue'
 import AvatarEditor from '@/components/AvatarEditor.vue'
 import AvatarDecorationEditor from '@/components/avatar-decoration/AvatarDecorationEditor.vue'
 import TheaterPresentationEditorModal from '@/components/theater-presentation/TheaterPresentationEditorModal.vue'
+import type { MultiplayerTheaterPresentationApply } from '@/components/theater-presentation/theaterPresentationEditorState'
 import TheaterDialogueControllerIdentity from './components/TheaterDialogueControllerIdentity.vue'
 import { readDialogueController, type DialogueControllerTemplate } from '@/views/theater/dialogue/theater-dialogue-controller'
 import UserAvatarDecoration from '@/components/user-avatar-decoration.vue'
@@ -150,7 +151,6 @@ import {
   resolveTheaterPresentation,
   type TheaterPresentation,
   type TheaterPresentationPatch,
-  type TheaterTransform,
   type WorldTheaterPresentationTemplate,
   type WorldTheaterPresentationTemplateSection,
 } from '@/types/theaterPresentation'
@@ -193,6 +193,7 @@ import MessageImageEditor from '@/components/chat/MessageImageEditor.vue';
 import type { MessageImageEditorResult } from '@/composables/useMessageImageEditor';
 import { ensurePinyinLoaded, matchKeywords, matchText, type KeywordMatchResult } from '@/utils/pinyinMatch';
 import { generateIFormEmbedLink } from '@/utils/iformEmbedLink';
+import { resolvePublicLinkBase } from '@/utils/publicLinkBase';
 import { buildMessageCursor } from '@/utils/messageCursor';
 import {
   buildInternalSurfaceResourceKey,
@@ -601,22 +602,6 @@ const handleDice3DDockMove = async (position: { x: number, y: number }) => {
   }
 };
 
-const resolveIFormEmbedLinkBase = () => {
-  const domain = utils.config?.domain?.trim() || '';
-  if (!domain) {
-    return undefined;
-  }
-  const webUrl = utils.config?.webUrl?.trim() || '';
-  let base = domain;
-  if (!/^(https?:)?\/\//i.test(base)) {
-    base = `${window.location.protocol}//${base}`;
-  }
-  if (webUrl) {
-    base = `${base}${webUrl.startsWith('/') ? '' : '/'}${webUrl}`;
-  }
-  return base;
-};
-
 const defaultIFormEmbedLink = computed(() => {
   const worldId = chat.currentWorldId;
   const channelId = chat.curChannel?.id;
@@ -635,7 +620,7 @@ const defaultIFormEmbedLink = computed(() => {
       width: firstForm.defaultWidth,
       height: firstForm.defaultHeight,
     },
-    { base: resolveIFormEmbedLinkBase() },
+    { base: resolvePublicLinkBase(utils.config) },
   );
 });
 
@@ -5589,13 +5574,17 @@ const openIdentityVariantTheaterPresentationEditor = async () => {
 };
 
 const toggleTheaterPresentationEditorMode = () => {
-  if (!theaterPresentationControllerTemplate.value || theaterPresentationEditorMode.value === 'variant') return;
+  if (theaterPresentationApplying.value || !theaterPresentationControllerTemplate.value || theaterPresentationEditorMode.value === 'variant') return;
   theaterPresentationEditorMode.value = theaterPresentationEditorMode.value === 'multiplayer' ? 'base' : 'multiplayer';
 };
 
 const handleTheaterPresentationApply = async (value: TheaterPresentation | TheaterPresentationPatch) => {
   if (theaterPresentationApplying.value) return;
   theaterPresentationApplying.value = true;
+  const previousPresentation = cloneChannelIdentityTheaterPresentation(identityForm.theaterPresentation);
+  const applyChannelId = chat.curChannel?.id;
+  const applyIdentityId = editingIdentity.value?.id;
+  let stagedPresentation: TheaterPresentation | null = null;
   let saved = false;
   try {
     if (theaterPresentationEditorMode.value === 'variant') {
@@ -5608,6 +5597,7 @@ const handleTheaterPresentationApply = async (value: TheaterPresentation | Theat
     } else {
       const submittedPresentation = cloneChannelIdentityTheaterPresentation(value as TheaterPresentation);
       identityForm.theaterPresentation = submittedPresentation;
+      stagedPresentation = identityForm.theaterPresentation;
       if (editingIdentity.value?.sharedIdentityId && !isManagingBotIdentity.value && editingIdentity.value.id && chat.curChannel?.id) {
         try {
           const savedIdentity = await chat.sharedChannelIdentityTheaterPresentationSet(editingIdentity.value.id, {
@@ -5646,14 +5636,20 @@ const handleTheaterPresentationApply = async (value: TheaterPresentation | Theat
       theaterPresentationEditorVisible.value = false;
     }
   } finally {
+    if (!saved && theaterPresentationEditorMode.value !== 'variant'
+      && chat.curChannel?.id === applyChannelId && editingIdentity.value?.id === applyIdentityId
+      && identityForm.theaterPresentation === stagedPresentation) {
+      identityForm.theaterPresentation = previousPresentation;
+    }
     theaterPresentationApplying.value = false;
   }
 };
 
-const handleMultiplayerPortraitApply = async (transform: TheaterTransform | undefined) => {
-  const presentation = cloneChannelIdentityTheaterPresentation(identityForm.theaterPresentation)
-    || createDefaultTheaterPresentation();
-  if (transform) presentation.multiplayerPortraitTransform = JSON.parse(JSON.stringify(transform));
+const handleMultiplayerPortraitApply = async ({ presentation: draft, multiplayerPortraitTransform }: MultiplayerTheaterPresentationApply) => {
+  if (theaterPresentationApplying.value) return;
+  const presentation = cloneChannelIdentityTheaterPresentation(draft);
+  if (!presentation) return;
+  if (multiplayerPortraitTransform) presentation.multiplayerPortraitTransform = JSON.parse(JSON.stringify(multiplayerPortraitTransform));
   else delete presentation.multiplayerPortraitTransform;
   await handleTheaterPresentationApply(presentation);
 };

@@ -298,6 +298,7 @@ import { CopyOutline, OpenOutline, TrashOutline } from '@vicons/ionicons5';
 import type { ChannelIForm } from '@/types/iform';
 import { copyTextWithFallback } from '@/utils/clipboard';
 import { generateIFormEmbedLink } from '@/utils/iformEmbedLink';
+import { resolvePublicLinkBase } from '@/utils/publicLinkBase';
 import {
   generateInternalSurfaceLink,
   openInternalSurfaceLink,
@@ -598,22 +599,6 @@ const openFloating = (formId: string) => {
   iform.openFloating(formId, { windowId });
 };
 
-const resolveEmbedLinkBase = () => {
-  const domain = utils.config?.domain?.trim() || '';
-  if (!domain) {
-    return undefined;
-  }
-  const webUrl = utils.config?.webUrl?.trim() || '';
-  let base = domain;
-  if (!/^(https?:)?\/\//i.test(base)) {
-    base = `${window.location.protocol}//${base}`;
-  }
-  if (webUrl) {
-    base = `${base}${webUrl.startsWith('/') ? '' : '/'}${webUrl}`;
-  }
-  return base;
-};
-
 const copyEmbedLink = async (form: ChannelIForm) => {
   const worldId = chat.currentWorldId;
   const channelId = chat.curChannel?.id;
@@ -629,7 +614,7 @@ const copyEmbedLink = async (form: ChannelIForm) => {
       width: form.defaultWidth,
       height: form.defaultHeight,
     },
-    { base: resolveEmbedLinkBase() },
+    { base: resolvePublicLinkBase(utils.config) },
   );
   const copied = await copyTextWithFallback(link);
   if (copied) {

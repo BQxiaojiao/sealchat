@@ -101,28 +101,44 @@ type TTSCache struct {
 }
 
 func MigrateTTS(db *gorm.DB) error {
-	// Repair historical nullable columns before applying NOT NULL constraints.
-	for _, table := range []any{&AIUsageLogModel{}, &AIUsageLedgerModel{}, &AIQuotaReservationModel{}} {
-		if db.Migrator().HasColumn(table, "quota_kind") {
-			if err := db.Model(table).Where("quota_kind IS NULL OR quota_kind = ?", "").Update("quota_kind", QuotaKindText).Error; err != nil {
-				return err
-			}
+	// Standalone callers may not have initialized the ledger through DBInit.
+	if !db.Migrator().HasTable(&SchemaMigrationModel{}) {
+		if err := EnsureSchemaMigrationTable(db); err != nil {
+			return err
 		}
 	}
-	// A previous nullable version of the role TTS flag may already exist. Repair
-	// those rows before SQLite rebuilds the table to apply NOT NULL.
-	if db.Migrator().HasColumn(&ChannelIdentityTTSConfig{}, "disabled") {
-		if err := db.Model(&ChannelIdentityTTSConfig{}).Where("disabled IS NULL").UpdateColumn("disabled", false).Error; err != nil {
-			return err
+	const legacyMigrationKey = "tts_legacy_nullable_defaults_v1"
+	completed, err := SchemaMigrationCompleted(db, legacyMigrationKey)
+	if err != nil {
+		return err
+	}
+	if !completed {
+		// Repair historical nullable columns before applying NOT NULL constraints.
+		for _, table := range []any{&AIUsageLogModel{}, &AIUsageLedgerModel{}, &AIQuotaReservationModel{}} {
+			if db.Migrator().HasColumn(table, "quota_kind") {
+				if err := db.Model(table).Where("quota_kind IS NULL OR quota_kind = ?", "").Update("quota_kind", QuotaKindText).Error; err != nil {
+					return err
+				}
+			}
+		}
+		// A previous nullable version of the role TTS flag may already exist. Repair
+		// those rows before SQLite rebuilds the table to apply NOT NULL.
+		if db.Migrator().HasColumn(&ChannelIdentityTTSConfig{}, "disabled") {
+			if err := db.Model(&ChannelIdentityTTSConfig{}).Where("disabled IS NULL").UpdateColumn("disabled", false).Error; err != nil {
+				return err
+			}
 		}
 	}
 	if err := db.AutoMigrate(&AIUsageLogModel{}, &AIUsageLedgerModel{}, &AIQuotaReservationModel{}, &TTSUserPolicy{}, &TTSWorldPolicy{}, &TTSVoice{}, &ChannelIdentityTTSConfig{}, &TTSJob{}, &TTSCache{}); err != nil {
 		return err
 	}
-	for _, table := range []any{&AIUsageLogModel{}, &AIUsageLedgerModel{}, &AIQuotaReservationModel{}} {
-		if err := db.Model(table).Where("quota_kind IS NULL OR quota_kind = ?", "").Update("quota_kind", QuotaKindText).Error; err != nil {
-			return err
+	if !completed {
+		for _, table := range []any{&AIUsageLogModel{}, &AIUsageLedgerModel{}, &AIQuotaReservationModel{}} {
+			if err := db.Model(table).Where("quota_kind IS NULL OR quota_kind = ?", "").Update("quota_kind", QuotaKindText).Error; err != nil {
+				return err
+			}
 		}
+		return MarkSchemaMigrationCompleted(db, legacyMigrationKey)
 	}
 	return nil
 }

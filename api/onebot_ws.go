@@ -26,7 +26,9 @@ func oneBotWSWorks(app *fiber.App, webUrl string) {
 func oneBotForwardWSHandler(role oneBotSessionRole) func(*websocket.Conn) {
 	return func(rawConn *websocket.Conn) {
 		conn := newWsSyncConn(rawConn, defaultWSOutboundQueueSize)
-		defer conn.Close()
+		defer func() {
+			_ = conn.CloseAndWait()
+		}()
 		token := resolveOneBotAccessToken(rawConn.Headers("Authorization"))
 		if token == "" {
 			token = resolveOneBotAccessToken(rawConn.Query("access_token"))
@@ -49,8 +51,11 @@ func oneBotForwardWSHandler(role oneBotSessionRole) func(*websocket.Conn) {
 		session.SelfID = selfID
 		getOneBotRuntime().registerSession(session)
 		defer getOneBotRuntime().unregisterSession(session.ID)
-		stopLiveness := startOneBotWSLiveness(rawConn, session)
-		defer stopLiveness()
+		stopLiveness, livenessDone := startOneBotWSLiveness(rawConn, session)
+		defer func() {
+			stopLiveness()
+			<-livenessDone
+		}()
 
 		for {
 			_, body, err := rawConn.ReadMessage()

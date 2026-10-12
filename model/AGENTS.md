@@ -82,6 +82,8 @@ Be deliberate with:
 
 Reuse existing base models and ID conventions.
 
+Historical data repairs and one-time backfills must use the `schema_migrations` ledger; keep schema `AutoMigrate` outside one-time migration keys. Mark completion only after success, and allow failed migrations to retry on the next startup.
+
 Do not add indexes blindly. Every index adds write, storage, and migration cost.
 
 For a new hot query, inspect the real `WHERE`, `ORDER BY`, expected cardinality, and existing indexes before adding another one.

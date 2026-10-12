@@ -34,6 +34,7 @@ export type TheaterSelection =
 export type TheaterEditorCommand =
   | { type: 'select'; target: TheaterSelection }
   | { type: 'set-transform'; target: TheaterSelection; transform: Partial<TheaterTransform> }
+  | { type: 'set-multiplayer-transform'; transform: TheaterTransform }
   | { type: 'set-media'; target: TheaterSelection; media: TheaterMediaRef | null }
   | { type: 'set-layer-property'; target: TheaterSelection; property: 'enabled' | 'fit' | 'blendMode' | 'playbackRate' | 'fadeDurationMs' | 'fontScale' | 'fontAssetId'; value: boolean | string | number }
   | { type: 'set-media-fx'; target: TheaterSelection; mediaFx: MediaFxSpec | null }
@@ -114,6 +115,31 @@ export const createTheaterPresentationEditorState = (input: {
   }
 }
 
+export interface MultiplayerTheaterPresentationApply {
+  presentation: TheaterPresentation
+  multiplayerPortraitTransform: TheaterPresentation['multiplayerPortraitTransform']
+}
+
+export const createMultiplayerTheaterPresentationDraft = (input: {
+  presentation?: TheaterPresentation | null
+  worldTemplate?: WorldTheaterPresentationTemplate | null
+  fallbackTransform: TheaterTransform
+}): TheaterPresentation => {
+  const { draft } = createTheaterPresentationEditorState({ mode: 'base', ...input })
+  draft.multiplayerPortraitTransform = clone(draft.multiplayerPortraitTransform || input.fallbackTransform)
+  return draft
+}
+
+export const buildMultiplayerTheaterPresentationApply = (draft: TheaterPresentation): MultiplayerTheaterPresentationApply => {
+  const presentation = theaterPresentationSchema.parse(draft)
+  return {
+    presentation,
+    multiplayerPortraitTransform: presentation.multiplayerPortraitTransform
+      ? clone(presentation.multiplayerPortraitTransform)
+      : undefined,
+  }
+}
+
 export const captureTheaterEditorSnapshot = (state: TheaterEditorState): TheaterEditorSnapshot => ({
   draft: clone(state.draft),
   selection: clone(state.selection),
@@ -144,6 +170,10 @@ const markCustom = (state: TheaterEditorState, section: TheaterSection) => {
 }
 
 const applyCommand = (state: TheaterEditorState, command: TheaterEditorCommand): boolean => {
+  if (command.type === 'set-multiplayer-transform') {
+    state.draft.multiplayerPortraitTransform = clone(command.transform)
+    return true
+  }
   if (command.type === 'select') {
     state.selection = clone(command.target)
     return true

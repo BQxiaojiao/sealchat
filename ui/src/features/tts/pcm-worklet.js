@@ -14,6 +14,8 @@ export class PCMStream {
     this.pending = new Uint8Array(0)
     this.started = false
     this.ended = false
+    this.underrunFrames = 0
+    this.underrunGraceFrames = Math.round(outputRate * 0.25)
   }
   push(bytes) {
     if (this.ended) throw new Error('PCM after end')
@@ -39,8 +41,15 @@ export class PCMStream {
     if (!this.started) return { output, done: false, underrun: false }
     for (let i = 0; i < length; i++) {
       const index = Math.floor(this.position)
-      if (index >= this.write) return { output, done: this.ended, underrun: !this.ended }
-      if (index + 1 >= this.write && !this.ended) return { output, done: false, underrun: true }
+      if (index >= this.write) {
+        if (this.ended) return { output, done: true, underrun: false }
+        this.underrunFrames += length - i
+        return { output, done: false, underrun: this.underrunFrames > this.underrunGraceFrames }
+      }
+      if (index + 1 >= this.write && !this.ended) {
+        this.underrunFrames += length - i
+        return { output, done: false, underrun: this.underrunFrames > this.underrunGraceFrames }
+      }
       const fraction = this.position - index
       for (let ch = 0; ch < this.channels; ch++) {
         const a = this.ring[ch][index % this.capacity]
@@ -49,6 +58,7 @@ export class PCMStream {
       }
       this.position += this.step
       this.read = Math.min(Math.floor(this.position), this.write)
+      this.underrunFrames = 0
     }
     return { output, done: this.ended && this.position >= this.write, underrun: false }
   }

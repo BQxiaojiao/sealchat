@@ -14,6 +14,7 @@ import { restoreQuickFormatTextFromHtml } from '@/utils/plainQuickFormat';
 import { contentUnescape } from '@/utils/tools';
 import { useDisplayStore } from '@/stores/display';
 import { generateMessageLink } from '@/utils/messageLink';
+import { resolvePublicLinkBase } from '@/utils/publicLinkBase';
 import { navigateToMessageTarget } from '@/utils/messageJump';
 import { copyTextWithFallback } from '@/utils/clipboard';
 const ReactionQuickPicker = defineAsyncComponent(() => import('./ReactionQuickPicker.vue'));
@@ -721,19 +722,7 @@ const clickCopyMessageLink = async () => {
     return;
   }
 
-  const linkBase = (() => {
-    const domain = utils.config?.domain?.trim() || '';
-    if (!domain) return '';
-    const webUrl = utils.config?.webUrl?.trim() || '';
-    let base = domain;
-    if (!/^(https?:)?\/\//i.test(base)) {
-      base = `${window.location.protocol}//${base}`;
-    }
-    if (webUrl) {
-      base = `${base}${webUrl.startsWith('/') ? '' : '/'}${webUrl}`;
-    }
-    return base;
-  })();
+  const linkBase = resolvePublicLinkBase(utils.config);
 
   const link = generateMessageLink(
     {

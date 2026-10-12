@@ -178,9 +178,11 @@ func refreshOneBotReadDeadline(conn oneBotWSLivenessConn, session *oneBotSession
 	}
 }
 
-func startOneBotWSLiveness(conn oneBotWSLivenessConn, session *oneBotSession) func() {
+func startOneBotWSLiveness(conn oneBotWSLivenessConn, session *oneBotSession) (func(), <-chan struct{}) {
 	if conn == nil || session == nil {
-		return func() {}
+		done := make(chan struct{})
+		close(done)
+		return func() {}, done
 	}
 	refreshOneBotReadDeadline(conn, session)
 	conn.SetPongHandler(func(string) error {
@@ -189,7 +191,9 @@ func startOneBotWSLiveness(conn oneBotWSLivenessConn, session *oneBotSession) fu
 	})
 
 	stop := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(oneBotPingInterval)
 		defer ticker.Stop()
 		for {
@@ -209,7 +213,7 @@ func startOneBotWSLiveness(conn oneBotWSLivenessConn, session *oneBotSession) fu
 
 	return func() {
 		close(stop)
-	}
+	}, done
 }
 
 type oneBotRuntime struct {
@@ -801,7 +805,7 @@ func (rt *oneBotRuntime) runReverseDialLoop(controller *oneBotReverseController,
 		session := newOneBotSession(botUser, role, oneBotSessionSourceReverse, &oneBotClientSyncConn{Conn: conn})
 		session.SelfID = selfID
 		rt.registerSession(session)
-		stopLiveness := startOneBotWSLiveness(conn, session)
+		stopLiveness, _ := startOneBotWSLiveness(conn, session)
 
 		done := make(chan struct{})
 		go func() {

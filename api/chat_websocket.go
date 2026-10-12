@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -86,6 +87,7 @@ type WsSyncConn struct {
 	outbound            chan wsOutboundMessage
 	interactiveOutbound chan wsOutboundMessage
 	done                chan struct{}
+	closeDone           chan struct{}
 	closeOnce           sync.Once
 	outboundSocket      wsOutboundSocket
 	coalescedMu         sync.Mutex
@@ -107,6 +109,7 @@ func newWsSyncConn(raw *websocket.Conn, queueSize int) *WsSyncConn {
 		outbound:            make(chan wsOutboundMessage, queueSize),
 		interactiveOutbound: make(chan wsOutboundMessage, wsInteractiveQueueSize),
 		done:                make(chan struct{}),
+		closeDone:           make(chan struct{}),
 		outboundSocket:      outboundSocket,
 		coalesced:           make(map[string]wsCoalescedEntry),
 		coalescedWake:       make(chan struct{}, 1),
@@ -310,6 +313,13 @@ func (c *WsSyncConn) popOldestCoalesced() (wsOutboundMessage, bool) {
 }
 
 func (c *WsSyncConn) outboundWriter() {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.Printf("[WS] outbound writer panic: %v\n%s", recovered, debug.Stack())
+			_ = c.Close()
+		}
+	}()
+
 	interactiveBurst := 0
 	nonCoalescedBurst := 0
 	for {
@@ -441,15 +451,33 @@ func (c *WsSyncConn) Close() error {
 		if c.Mux.TryLock() {
 			closeErr = c.closeSocketLocked()
 			c.Mux.Unlock()
+			if c.closeDone != nil {
+				close(c.closeDone)
+			}
 			return
 		}
 		go func() {
 			c.Mux.Lock()
-			defer c.Mux.Unlock()
 			_ = c.closeSocketLocked()
+			c.Mux.Unlock()
+			if c.closeDone != nil {
+				close(c.closeDone)
+			}
 		}()
 	})
 	return closeErr
+}
+
+// CloseAndWait lets the handler return only after socket writes and close have finished.
+func (c *WsSyncConn) CloseAndWait() error {
+	if c == nil {
+		return nil
+	}
+	err := c.Close()
+	if c.closeDone != nil {
+		<-c.closeDone
+	}
+	return err
 }
 
 func (c *WsSyncConn) closeSocketLocked() error {
@@ -1279,7 +1307,7 @@ func websocketWorks(app *fiber.App, webUrl string, outboundQueueSize int) {
 			if !preAuthReleased {
 				releasePreAuthConnection(clientAddr)
 			}
-			_ = c.Close()
+			_ = c.CloseAndWait()
 		}()
 
 		// 设置pong处理器，收到pong时更新连接活跃状态
@@ -1293,10 +1321,16 @@ func websocketWorks(app *fiber.App, webUrl string, outboundQueueSize int) {
 			return nil
 		})
 
-		// 启动ping goroutine，定期发送WebSocket ping帧检测连接是否存活
+		// 启动ping goroutine，定期发送WebSocket ping帧检测连接是否存活。
+		// handler 返回前必须等待它退出，避免框架回收 hijackConn 时仍有控制帧写入。
 		pingDone := make(chan struct{})
-		defer close(pingDone)
+		pingExited := make(chan struct{})
+		defer func() {
+			close(pingDone)
+			<-pingExited
+		}()
 		go func() {
+			defer close(pingExited)
 			for {
 				// BOT 使用 15s ping 间隔，普通用户使用 30s
 				interval := 30 * time.Second

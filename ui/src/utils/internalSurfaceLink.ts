@@ -1,4 +1,5 @@
 import { isMobileBrowserRuntime } from './windowFocusState';
+import { resolvePublicLinkBase, type PublicLinkConfig } from './publicLinkBase';
 
 export const INTERNAL_SURFACE_TYPES = ['iform', 'note', 'character', 'clue', 'clue-board'] as const;
 
@@ -15,27 +16,9 @@ export const buildInternalSurfaceResourceKey = (params: InternalSurfaceLinkParam
   `${params.type}:${params.id}:${params.worldId}:${params.channelId}`
 );
 
-interface InternalSurfaceLinkConfig {
-  domain?: string | null;
-  webUrl?: string | null;
-}
-
 export const resolveInternalSurfaceLinkBase = (
-  config?: InternalSurfaceLinkConfig | null,
-): string | undefined => {
-  const domain = config?.domain?.trim() || '';
-  if (!domain) return undefined;
-  let base = domain;
-  if (!/^(https?:)?\/\//i.test(base)) {
-    const protocol = typeof window === 'undefined' ? 'https:' : window.location.protocol;
-    base = `${protocol}//${base}`;
-  }
-  const webUrl = config?.webUrl?.trim() || '';
-  if (webUrl) {
-    base = `${base.replace(/\/+$/, '')}/${webUrl.replace(/^\/+/, '')}`;
-  }
-  return base;
-};
+  config?: PublicLinkConfig | null,
+): string | undefined => resolvePublicLinkBase(config);
 
 export function generateInternalSurfaceLink(
   params: InternalSurfaceLinkParams,

@@ -65,6 +65,12 @@ func DBInit(cfg *utils.AppConfig) {
 	if cfg == nil {
 		panic("配置不可为空")
 	}
+	dbInitStartedAt := time.Now()
+	phaseStartedAt := dbInitStartedAt
+	logPhase := func(name string) {
+		log.Printf("[数据库] DBInit 阶段完成: %s，用时 %s", name, time.Since(phaseStartedAt))
+		phaseStartedAt = time.Now()
+	}
 	dsn := cfg.DSN
 	resetSQLiteFTSState()
 	resetPostgresFTSState()
@@ -115,15 +121,25 @@ func DBInit(cfg *utils.AppConfig) {
 		applySQLiteConnPool(db, sqliteCfg)
 		ensureSQLiteAutoVacuum(db)
 	}
+	logPhase("连接与基础配置")
 
-	if db.Migrator().HasTable(&UserModel{}) {
-		_ = UsersDuplicateRemove()
+	if err := EnsureSchemaMigrationTable(db); err != nil {
+		panic(fmt.Sprintf("初始化数据库迁移记录表失败: %v", err))
 	}
 
-	if db.Migrator().HasTable(&MessageModel{}) {
-		// 删除外键约束
-		_ = db.Migrator().DropConstraint(&MessageModel{}, "fk_messages_quote")
+	// Clean legacy duplicates before AutoMigrate restores the users unique index.
+	if err := RunSchemaMigration(db, "users_duplicate_cleanup_v1", func() error {
+		if !db.Migrator().HasTable(&UserModel{}) {
+			return nil
+		}
+		return UsersDuplicateRemove()
+	}); err != nil {
+		log.Printf("清理重复用户失败: %v", err)
 	}
+	if err := migrateMessageQuoteConstraint(db); err != nil {
+		log.Printf("清理消息 quote 外键失败: %v", err)
+	}
+	logPhase("迁移记录与前置修复")
 
 	db.AutoMigrate(&ChannelModel{})
 	db.AutoMigrate(&GuildModel{})
@@ -150,6 +166,11 @@ func DBInit(cfg *utils.AppConfig) {
 	if err := autoMigrateTheaterModels(db); err != nil {
 		panic(fmt.Sprintf("初始化 Theater 数据表失败: %v", err))
 	}
+	if err := RunSchemaMigration(db, "theater_legacy_fields_v1", func() error {
+		return migrateTheaterLegacyFields(db)
+	}); err != nil {
+		panic(fmt.Sprintf("迁移 Theater 历史字段失败: %v", err))
+	}
 	db.AutoMigrate(&ChannelAttachmentImageLayoutModel{})
 	db.AutoMigrate(&MentionModel{})
 	db.AutoMigrate(&TimelineModel{})
@@ -161,11 +182,13 @@ func DBInit(cfg *utils.AppConfig) {
 	db.AutoMigrate(&ChannelLatestReadModel{})
 	db.AutoMigrate(&SharedChannelIdentityModel{}, &SharedChannelIdentityWorldPresentationModel{}, &SharedChannelIdentitySyncRetryModel{}, &ChannelIdentityModel{})
 	db.AutoMigrate(&ChannelCharacterRemarkModel{})
-	if err := MigrateSharedChannelIdentityWorldScope(); err != nil {
+	if err := RunSchemaMigration(db, "shared_channel_identity_world_scope_v1", MigrateSharedChannelIdentityWorldScope); err != nil {
 		log.Printf("迁移共享角色世界作用域失败: %v", err)
 	}
 	db.AutoMigrate(&ChannelIdentityVariantModel{})
-	if err := cleanupUnsupportedTheaterPresentations(db); err != nil {
+	if err := RunSchemaMigration(db, "theater_presentation_cleanup_v1", func() error {
+		return cleanupUnsupportedTheaterPresentations(db)
+	}); err != nil {
 		log.Printf("cleanup unsupported theater presentations failed: %v", err)
 	}
 	db.AutoMigrate(&ChannelIdentityModeConfigModel{})
@@ -186,6 +209,7 @@ func DBInit(cfg *utils.AppConfig) {
 	db.AutoMigrate(&AIUserQuotaOverrideModel{})
 	db.AutoMigrate(&PlatformFontAsset{})
 	db.AutoMigrate(&DiceMacroModel{})
+	logPhase("核心模型迁移")
 
 	db.AutoMigrate(&SystemRoleModel{}, &ChannelRoleModel{}, &RolePermissionModel{}, &UserRoleMappingModel{})
 	db.AutoMigrate(&FriendModel{}, &FriendRequestModel{})
@@ -214,35 +238,39 @@ func DBInit(cfg *utils.AppConfig) {
 	db.AutoMigrate(&UserPreferenceModel{})
 	db.AutoMigrate(&UserAIProviderProfileModel{})
 	db.AutoMigrate(&ExportColorProfileModel{})
+	logPhase("业务模型迁移")
 	if err := ensureChatHistoryIndexes(); err != nil {
 		log.Printf("初始化聊天历史索引失败: %v", err)
 	}
 	if err := ensureDigestPushIndexesAndConstraints(); err != nil {
 		log.Printf("初始化未读提醒索引失败: %v", err)
 	}
-	if err := db.Model(&ChannelModel{}).
-		Where("default_dice_expr = '' OR default_dice_expr IS NULL").
-		Update("default_dice_expr", "d20").Error; err != nil {
+	if err := RunSchemaMigration(db, "channel_default_dice_expr_v1", func() error {
+		return db.Model(&ChannelModel{}).
+			Where("default_dice_expr = '' OR default_dice_expr IS NULL").
+			Update("default_dice_expr", "d20").Error
+	}); err != nil {
 		log.Printf("初始化频道默认骰失败: %v", err)
 	}
 
-	if err := BackfillMessageDisplayOrder(); err != nil {
+	if err := RunSchemaMigration(db, "message_display_order_backfill_v1", BackfillMessageDisplayOrder); err != nil {
 		log.Printf("补齐消息 display_order 失败: %v", err)
 	}
-	if err := BackfillAudioAssetSortOrder(); err != nil {
+	if err := RunSchemaMigration(db, "audio_asset_sort_order_backfill_v1", BackfillAudioAssetSortOrder); err != nil {
 		log.Printf("补齐音频素材 sort_order 失败: %v", err)
 	}
 
-	if err := BackfillChannelRecentSentAt(); err != nil {
+	if err := RunSchemaMigration(db, "channel_recent_sent_at_backfill_v1", BackfillChannelRecentSentAt); err != nil {
 		log.Printf("回填频道最近发言时间失败: %v", err)
 	}
 
-	if err := BackfillWorldData(); err != nil {
+	if err := RunSchemaMigration(db, "world_data_backfill_v1", BackfillWorldData); err != nil {
 		log.Printf("初始化世界数据失败: %v", err)
 	}
-	if err := BackfillBotKinds(); err != nil {
+	if err := RunSchemaMigration(db, "bot_kind_backfill_v1", BackfillBotKinds); err != nil {
 		log.Printf("回填 bot_kind 失败: %v", err)
 	}
+	logPhase("索引与历史回填")
 
 	if IsSQLite() {
 		go func() {
@@ -258,6 +286,18 @@ func DBInit(cfg *utils.AppConfig) {
 			}
 		}()
 	}
+	log.Printf("[数据库] DBInit 完成，总用时 %s", time.Since(dbInitStartedAt))
+}
+
+func migrateMessageQuoteConstraint(conn *gorm.DB) error {
+	return RunSchemaMigration(conn, "messages_drop_quote_fk_v1", func() error {
+		migrator := conn.Migrator()
+		if !migrator.HasTable(&MessageModel{}) || !migrator.HasConstraint(&MessageModel{}, "fk_messages_quote") {
+			return nil
+		}
+		// SQLite DropConstraint rebuilds the table even when the name is absent.
+		return migrator.DropConstraint(&MessageModel{}, "fk_messages_quote")
+	})
 }
 
 func ensureChatHistoryIndexes() error {
@@ -297,10 +337,12 @@ func ensureDigestPushIndexesAndConstraints() error {
 	if db == nil {
 		return nil
 	}
-	if err := deduplicateDigestPushRules(); err != nil {
-		return err
-	}
-	if err := deduplicateDigestRecords(); err != nil {
+	if err := RunSchemaMigration(db, "digest_duplicate_cleanup_v1", func() error {
+		if err := deduplicateDigestPushRules(); err != nil {
+			return err
+		}
+		return deduplicateDigestRecords()
+	}); err != nil {
 		return err
 	}
 	if !db.Migrator().HasIndex(&DigestPushRuleModel{}, "udx_digest_push_rule_scope") {

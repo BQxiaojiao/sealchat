@@ -308,6 +308,7 @@ import { useUtilsStore } from '@/stores/utils'
 import { uploadImageAttachment } from '@/views/chat/composables/useAttachmentUploader'
 import { normalizeAttachmentId } from '@/composables/useAttachmentResolver'
 import { generateStickyNoteEmbedLink } from '@/utils/stickyNoteEmbedLink'
+import { resolvePublicLinkBase } from '@/utils/publicLinkBase'
 import { buildInternalSurfaceResourceKey, generateInternalSurfaceLink, resolveInternalSurfaceLinkBase } from '@/utils/internalSurfaceLink'
 import { requestTheaterFloatingTakeover } from '@/utils/theaterFloatingBridge'
 import { copyTextWithFallback, copyTextWithResult } from '@/utils/clipboard'
@@ -491,7 +492,7 @@ const defaultStickyNoteEmbedLink = computed(() => {
       channelId,
       noteId: currentNote.id,
     },
-    { base: resolveIFormEmbedLinkBase() },
+    { base: resolvePublicLinkBase(utilsStore.config) },
   )
 })
 
@@ -599,22 +600,6 @@ const handleStickyNoteHighlight = (event: any) => {
 
 chatEvent.on('sticky-note-highlight' as any, handleStickyNoteHighlight as any)
 
-
-const resolveIFormEmbedLinkBase = () => {
-  const domain = utilsStore.config?.domain?.trim() || ''
-  if (!domain) {
-    return undefined
-  }
-  const webUrl = utilsStore.config?.webUrl?.trim() || ''
-  let base = domain
-  if (!/^(https?:)?\/\//i.test(base)) {
-    base = `${window.location.protocol}//${base}`
-  }
-  if (webUrl) {
-    base = `${base}${webUrl.startsWith('/') ? '' : '/'}${webUrl}`
-  }
-  return base
-}
 
 const creatorName = computed(() => {
   const creator = note.value?.creator
