@@ -73,8 +73,8 @@ const saveClue = (payload: Extract<StageAtomicAction, { type: 'clue.execute' }>[
 </script>
 
 <template>
-  <n-modal :show="show" :mask-closable="true" @update:show="emit('update:show', $event)">
-    <section class="theater-sequence-editor" role="dialog" aria-modal="true" aria-label="点击动作组合编辑器">
+  <n-modal :show="show" :mask-closable="true" :auto-focus="false" :trap-focus="false" @update:show="emit('update:show', $event)">
+    <div class="theater-sequence-editor" role="dialog" aria-modal="true" aria-label="点击动作组合编辑器">
       <header class="theater-sequence-editor__header">
         <div>
           <strong>{{ componentName }} · 点击动作组合</strong>
@@ -105,7 +105,7 @@ const saveClue = (payload: Extract<StageAtomicAction, { type: 'clue.execute' }>[
           @edit-clue="openClueEditor"
         />
       </div>
-    </section>
+    </div>
   </n-modal>
   <TheaterRandomTableEditor
     v-model:show="randomTableEditorVisible"
