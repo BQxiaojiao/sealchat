@@ -124,7 +124,8 @@ import {
 } from '../shared/stage-types'
 import { stageActionSchema, type ChatCharactersSnapshotPayload, type ChatClueAccessReadResult, type ChatClueOptionsReadResult, type StageSequenceTriggeredPayload } from '../bridge/theater-bridge-protocol'
 import { syncStageObjectHierarchy } from './stage-layering'
-import { compareStageLayersBottomToTop, compareStageLayersTopToBottom, planStageObjectRenderBands } from './stage-layer-order'
+import { compareStageLayersBottomToTop, compareStageLayersTopToBottom, planStageObjectRenderBands, stageObjectHasDomVisualDescendant } from './stage-layer-order'
+import { createStageDomVisualPreview } from './stage-dom-visual-preview'
 import { buildStageLayerRows, stageLayerSelectionExpansionIds } from './stage-layer-tree'
 import { stageSelectionRootIds } from './stage-selection'
 import { stageSceneTransitionKeyframes, stageSceneTransitionOptions } from './stage-scene-transition'
@@ -1289,7 +1290,8 @@ const workspaceRef = ref<HTMLDivElement | null>(null)
 const hasPermission = (permission: string) => props.syncReady && props.permissions.includes(permission)
 const canBrowseScenes = computed(() => hasPermission('stage.view'))
 const canEditAllObjects = computed(() => hasPermission('stage.object.edit'))
-const surfaceIframeInteractive = (target: StageSurfaceTarget) => (
+// The global "禁用交互" switch also overrides surface webpage testing.
+const surfaceIframeInteractive = (target: StageSurfaceTarget) => !iframeInteractionDisabled.value && (
   canEditAllObjects.value
     ? surfaceInteractionTest.value === target
     : props.store.state.liveState.surfaceEmbeds[target]?.interactive === true
@@ -3041,6 +3043,14 @@ let selectionGroupDrag: {
   nodes: Map<string, { node: Konva.Group, absolute: { x: number, y: number } }>
 } | null = null
 let batchTransformRootIds: string[] | null = null
+// DOM visuals follow their Konva node during drag/transform; formal transforms commit on end.
+const domVisualPreview = createStageDomVisualPreview({
+  getNode: objectId => objectNodes.get(objectId),
+  hasDomVisual: (objectId) => {
+    const object = stageObjects.value[objectId]
+    return Boolean(object && stageObjectHasDomVisualDescendant(object, stageObjects.value))
+  },
+})
 
 const drawWorldLayers = (immediate = false) => {
   if (immediate) {
@@ -7176,9 +7186,11 @@ const createObjectNode = (object: StageObject) => {
     setGridSnapPreview(gridSnapEnabled.value)
     props.store.beginObjectEdit('移动对象')
   })
-  wrapper.on('dragmove', () => {
+  wrapper.on('dragmove', (event) => {
     if (!multiDrag || multiDrag.driverId !== object.id) {
       snapNodeToGrid(wrapper)
+      // Drag events bubble; only the dragged node itself moved.
+      if ((event.target as Konva.Node) === wrapper) domVisualPreview.schedule([object.id])
       return
     }
     const current = wrapper.absolutePosition()
@@ -7198,6 +7210,7 @@ const createObjectNode = (object: StageObject) => {
         node.absolutePosition({ x: position.x + correction.x, y: position.y + correction.y })
       })
     }
+    domVisualPreview.schedule(multiDrag.nodes.keys())
     updateTransformer()
   })
   wrapper.on('dragend', () => {
@@ -7211,6 +7224,7 @@ const createObjectNode = (object: StageObject) => {
         current.transform.y = Number((node.y() / WORLD_UNIT_PX).toFixed(6))
       })
       props.store.commitObjectEdit()
+      domVisualPreview.clear()
       setGridSnapPreview(false)
       updateTransformer()
       return
@@ -7218,6 +7232,7 @@ const createObjectNode = (object: StageObject) => {
     const current = getObject(object.id)
     if (!canEditObject(current)) {
       props.store.cancelObjectEdit()
+      domVisualPreview.clear()
       setGridSnapPreview(false)
       return
     }
@@ -7227,6 +7242,7 @@ const createObjectNode = (object: StageObject) => {
     current.transform.x = Number((wrapper.x() / WORLD_UNIT_PX).toFixed(6))
     current.transform.y = Number((wrapper.y() / WORLD_UNIT_PX).toFixed(6))
     props.store.commitObjectEdit()
+    domVisualPreview.clear()
     setGridSnapPreview(false)
   })
   wrapper.on('dragcancel', finishGridSnapPreview)
@@ -7240,10 +7256,12 @@ const createObjectNode = (object: StageObject) => {
     const current = getObject(object.id)
     if (!canEditObject(current)) {
       props.store.cancelObjectEdit()
+      domVisualPreview.clear()
       return
     }
     applyObjectNodeTransform(wrapper, current)
     props.store.commitObjectEdit()
+    domVisualPreview.clear()
   })
   objectNodes.set(object.id, wrapper)
   return wrapper
@@ -8629,6 +8647,7 @@ onMounted(() => {
     props.store.beginObjectEdit('批量变换对象')
   })
   transformer.on('transform', () => {
+    domVisualPreview.schedule(transformer!.nodes().map(node => String(node.getAttr('stageObjectId') || '')))
     if (!batchTransformRootIds) return
     syncSelectionGroupHitArea(selectedMovementNodes().map(({ node }) => node))
     selectionGroupHitArea?.setAttrs({ visible: false, listening: false, draggable: false })
@@ -8650,6 +8669,7 @@ onMounted(() => {
     })
     if (valid) props.store.commitObjectEdit()
     else props.store.cancelObjectEdit()
+    domVisualPreview.clear()
     void nextTick(() => {
       syncObjects()
       updateTransformer()
@@ -8737,6 +8757,7 @@ onMounted(() => {
     }
     transformer?.forceUpdate()
     syncSelectionGroupHitArea([...selectionGroupDrag.nodes.values()].map(({ node }) => node))
+    domVisualPreview.schedule(selectionGroupDrag.nodes.keys())
     interactionLayer?.batchDraw()
   })
   selectionGroupHitArea.on('dragend', (event) => {
@@ -8751,6 +8772,7 @@ onMounted(() => {
       object.transform.y = Number((node.y() / WORLD_UNIT_PX).toFixed(6))
     })
     props.store.commitObjectEdit()
+    domVisualPreview.clear()
     setGridSnapPreview(false)
     void nextTick(() => {
       syncObjects()
@@ -8804,6 +8826,7 @@ onMounted(() => {
 })
 
 watch(() => props.store.state.activeSceneId, (sceneId, previousSceneId) => {
+  domVisualPreview.clear()
   hideImageAnnotation()
   closeImageAnnotationEditor()
   effectRuntime.invalidateCurrentMessage()
@@ -8904,6 +8927,7 @@ watch(() => props.syncReady, (ready, wasReady) => {
   if (ready && !wasReady) beginSceneMediaBatch(props.store.state.activeSceneId, false)
 })
 watch(() => [props.syncReady, ...props.permissions], () => {
+  domVisualPreview.clear()
   const selectedId = props.store.state.selectedObjectId
   const object = selectedId ? props.store.activeObjects.value[selectedId] : null
   if (object && !canEditObject(object)) props.store.clearSelection()
@@ -8956,6 +8980,7 @@ watch([scenePanelOpen, inspectorPanelOpen, layerPanelOpen, effectPanelOpen, sequ
   observeOpenPanels()
 })
 watch(() => [props.worldId, props.channelId], () => {
+  domVisualPreview.clear()
   if (quickToolPickerOpen.value) closeQuickToolPicker()
   if (canManageResources.value) void Promise.all([fetchTheaterAudioAssets(), fetchTheaterImageAssets()])
 })
@@ -9016,6 +9041,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('touchstart', unlockTheaterAudio, true)
   document.removeEventListener('keydown', unlockTheaterAudio, true)
   props.store.commitObjectEdit()
+  domVisualPreview.clear()
   finishGridSnapPreview()
   if (gridSyncFrame !== null) window.cancelAnimationFrame(gridSyncFrame)
   gridSyncFrame = null
@@ -9508,6 +9534,7 @@ onBeforeUnmount(() => {
             :channel-id="channelId"
             :scope-type="props.scopeType || 'channel'"
             :stacking-order="rootStackingOrder"
+            :visual-transforms="domVisualPreview.transforms"
             :character-snapshot="characterSnapshot"
             @embed-event-published="triggerEmbedEventActions"
           />
