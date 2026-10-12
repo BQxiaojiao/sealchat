@@ -75,6 +75,15 @@ const newObjectOffsets = [
 const stageObjectTypes: StageObjectType[] = ['group', 'drawing', 'text', 'image', 'button', 'character', 'video', 'effect', 'iframe']
 type StageInsertableObjectType = Exclude<StageObjectType, 'drawing'>
 
+// Optional initial world-unit center (and size) applied inside the same "添加对象" history entry.
+// Omitted width/height keep the type's default size from makeObject.
+export interface StageObjectPlacement {
+  x: number
+  y: number
+  width?: number
+  height?: number
+}
+
 const snapStageCoordinate = (value: number, fieldSize: number, gridSize: number) => {
   const step = Math.max(0.25, gridSize)
   const origin = -fieldSize / 2
@@ -517,7 +526,7 @@ export interface TheaterStageStore {
   moveSceneToFolder: (sceneId: string, folderId: string | null) => boolean
   setScenePublished: (sceneId: string, published: boolean) => boolean
   reorderScenes: (sceneId: string, targetId: string, placement: 'before' | 'after') => boolean
-  addObject: (type: StageInsertableObjectType, scope?: StageObjectScope) => StageObject
+  addObject: (type: StageInsertableObjectType, scope?: StageObjectScope, placement?: StageObjectPlacement) => StageObject
   addDrawing: (
     drawing: StageDrawing,
     transform: Pick<StageObjectTransform, 'x' | 'y' | 'width' | 'height' | 'rotation'>,
@@ -996,7 +1005,25 @@ export const createTheaterStageStore = (_storageKey?: string): TheaterStageStore
     ? state.persistentObjects
     : state.liveState.sceneObjects
 
-  const addObject = (type: StageInsertableObjectType, scope: StageObjectScope = 'scene') => runObjectEdit('添加对象', () => {
+  const applyObjectPlacement = (object: StageObject, placement: StageObjectPlacement) => {
+    const parents = objectParents(object, activeObjects.value)
+    const scaleX = parents.reduce((scale, parent) => scale * Math.abs(parent.transform.scaleX || 1), 1)
+    const scaleY = parents.reduce((scale, parent) => scale * Math.abs(parent.transform.scaleY || 1), 1)
+    const hasExplicitBounds = placement.width !== undefined && placement.height !== undefined
+    if (hasExplicitBounds && parents.length) {
+      const parentRotation = parents.reduce((rotation, parent) => rotation + parent.transform.rotation, 0)
+      object.transform.rotation = Number((object.transform.rotation - parentRotation).toFixed(6))
+    }
+    if (placement.width !== undefined) object.transform.width = Number((placement.width / scaleX).toFixed(6))
+    if (placement.height !== undefined) object.transform.height = Number((placement.height / scaleY).toFixed(6))
+    setObjectWorldPosition(object, activeObjects.value, placement)
+  }
+
+  const addObject = (
+    type: StageInsertableObjectType,
+    scope: StageObjectScope = 'scene',
+    placement?: StageObjectPlacement,
+  ) => runObjectEdit('添加对象', () => {
     const objects = objectCollectionForScope(type === 'group' ? 'scene' : scope)
     const object = makeObject(
       type === 'group'
@@ -1017,7 +1044,11 @@ export const createTheaterStageStore = (_storageKey?: string): TheaterStageStore
     )
     objects[object.id] = object
     placeObjectAbove(object, objects)
-    snapObjectToGrid(object, state.liveState, activeObjects.value, 'bounds')
+    if (placement) applyObjectPlacement(object, placement)
+    const hasPlacedBounds = placement?.width !== undefined && placement?.height !== undefined
+    // Drag placement already snaps its world-space corners before it reaches the store.
+    // Re-snapping a counter-rotated child would use local bounds and shift it away from the preview.
+    if (!hasPlacedBounds) snapObjectToGrid(object, state.liveState, activeObjects.value, 'bounds')
     setSelectedObjectIds([object.id], object.id)
     return object
   })
