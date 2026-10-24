@@ -503,6 +503,8 @@ export const useCharacterSheetStore = defineStore('characterSheet', () => {
 
   const resolveSheetTypeByCardId = (cardId?: string) => {
     if (!cardId) return '';
+    // characterCard 与 characterSheet 互为 setup 依赖，极早期调用时对方 store 可能尚未完成初始化
+    if (typeof cardStore.getCardById !== 'function') return '';
     return cardStore.getCardById(cardId)?.sheetType || '';
   };
 
@@ -1394,7 +1396,13 @@ export const useCharacterSheetStore = defineStore('characterSheet', () => {
     schedulePersistWindows();
   };
 
-  restoreWindows();
+  // characterCard 与 characterSheet 互为 setup 依赖（circular import）。
+  // 若在 setup 中同步调用对方 store 的方法，可能拿到 pinia 尚未 assign 完成的最小对象
+  // （例如 cardStore.getCardById 为 undefined），导致整个 store 初始化抛错。
+  // 推迟到微任务执行，确保依赖方 setup 已完成。
+  queueMicrotask(() => {
+    restoreWindows();
+  });
 
   return {
     windows,

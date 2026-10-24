@@ -138,8 +138,13 @@ watch(
 
 watch(
   () => managedWindowIds.value.length,
-  (len) => {
+  (len, prevLen) => {
     if (len > 0) {
+      // 窗口由 restoreWindows 延迟恢复，首次出现时补一次与挂载时一致的刷新
+      if (!prevLen) {
+        if (props.windowId) void sheetStore.refreshWindowAttrs(props.windowId);
+        else void sheetStore.refreshAllWindows();
+      }
       startPolling();
     } else {
       stopPolling();
