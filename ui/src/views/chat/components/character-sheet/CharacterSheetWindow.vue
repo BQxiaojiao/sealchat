@@ -96,6 +96,7 @@
                   placeholder="JSON 数据"
                   :autosize="{ minRows: 8 }"
                   class="sheet-window__json-input"
+                  @focus="handleJsonEditStart"
                   @blur="handleJsonSave"
                 />
                 <div v-if="jsonError" class="sheet-window__json-error">
@@ -284,10 +285,10 @@ const handleIframeEvent = (event: SealChatEvent) => {
     emit('rollRequest', event.payload.roll);
   } else if (event.action === 'EDIT_START') {
     if (windowData.value?.readOnly) return;
-    sheetStore.beginEditLock(props.windowId);
+    sheetStore.beginEditLock(props.windowId, 'iframe');
   } else if (event.action === 'EDIT_END') {
     if (windowData.value?.readOnly) return;
-    sheetStore.endEditLock(props.windowId);
+    sheetStore.endEditLock(props.windowId, 'iframe');
   } else if (event.action === 'UPDATE_ATTRS' && event.payload.attrs) {
     if (windowData.value?.readOnly) return;
     sheetStore.updateAttrs(props.windowId, {
@@ -560,14 +561,24 @@ const syncTemplateText = () => {
   }
 };
 
+// 序列化数据编辑器与模板 iframe 共用编辑锁：编辑期间暂停远端属性刷新，避免覆盖未保存的输入
+const handleJsonEditStart = () => {
+  const win = windowData.value;
+  if (!win || win.readOnly) return;
+  sheetStore.beginEditLock(props.windowId, 'json');
+};
+
 const handleJsonSave = () => {
-  if (windowData.value?.readOnly) return;
+  const win = windowData.value;
+  if (!win || win.readOnly) return;
   try {
     const parsed = JSON.parse(jsonText.value);
     jsonError.value = '';
     sheetStore.updateAttrs(props.windowId, parsed);
   } catch (e: any) {
     jsonError.value = 'JSON 格式错误: ' + (e.message || '');
+  } finally {
+    sheetStore.endEditLock(props.windowId, 'json');
   }
 };
 

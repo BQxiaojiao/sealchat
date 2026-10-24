@@ -39,6 +39,9 @@ export interface CharacterSheetWindow {
 
 type CharacterSheetSyncState = 'normal' | 'editing_locked' | 'resume_pending';
 
+// 编辑锁可同时被多个编辑来源持有，全部释放后才恢复远端同步
+export type CharacterSheetEditLockHolder = 'iframe' | 'json';
+
 const TEMPLATE_STORAGE_KEY = 'sealchat_character_sheet_templates';
 const WINDOWS_STORAGE_KEY = 'sealchat_character_sheet_windows';
 const BUBBLE_POSITIONS_KEY = 'sealchat_sheet_bubble_positions';
@@ -858,8 +861,9 @@ export const useCharacterSheetStore = defineStore('characterSheet', () => {
   };
 
   let attrsSyncTimer: Record<string, ReturnType<typeof setTimeout> | null> = {};
+  const editLockHoldersByWindow = new Map<string, Set<CharacterSheetEditLockHolder>>();
 
-  const beginEditLock = (windowId: string) => {
+  const beginEditLock = (windowId: string, holder: CharacterSheetEditLockHolder = 'iframe') => {
     const win = windows.value[windowId];
     if (!win) return;
     normalizeSyncState(win);
@@ -868,13 +872,30 @@ export const useCharacterSheetStore = defineStore('characterSheet', () => {
       win.hasSavedAfterEditEnd = false;
       win.pendingRemoteAttrs = undefined;
     }
+    let holders = editLockHoldersByWindow.get(windowId);
+    if (!holders) {
+      holders = new Set<CharacterSheetEditLockHolder>();
+      editLockHoldersByWindow.set(windowId, holders);
+    }
+    holders.add(holder);
     win.syncState = 'editing_locked';
     schedulePersistWindows();
   };
 
-  const endEditLock = (windowId: string) => {
+  const endEditLock = (windowId: string, holder: CharacterSheetEditLockHolder = 'iframe') => {
     const win = windows.value[windowId];
     if (!win) return;
+    const holders = editLockHoldersByWindow.get(windowId);
+    if (holders) {
+      holders.delete(holder);
+      if (holders.size > 0) {
+        schedulePersistWindows();
+        return;
+      }
+      editLockHoldersByWindow.delete(windowId);
+    } else if (win.syncState !== 'editing_locked') {
+      return;
+    }
     normalizeSyncState(win);
     if (!win.hasLocalEditsInLock) {
       win.syncState = 'normal';
@@ -1117,6 +1138,7 @@ export const useCharacterSheetStore = defineStore('characterSheet', () => {
     if (idx !== -1) {
       activeWindowIds.value.splice(idx, 1);
     }
+    editLockHoldersByWindow.delete(windowId);
     if (attrsSyncTimer[windowId]) {
       clearTimeout(attrsSyncTimer[windowId] as ReturnType<typeof setTimeout>);
       delete attrsSyncTimer[windowId];
@@ -1267,6 +1289,7 @@ export const useCharacterSheetStore = defineStore('characterSheet', () => {
       if (timer) clearTimeout(timer as ReturnType<typeof setTimeout>);
     }
     attrsSyncTimer = {};
+    editLockHoldersByWindow.clear();
     clearWindowStates();
   };
 
