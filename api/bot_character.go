@@ -85,6 +85,17 @@ func canSetOwnCharacterCard(ctx *ChatContext, userID string) bool {
 	return ctx != nil && ctx.User != nil && !ctx.IsReadOnly() && strings.TrimSpace(userID) == ctx.User.ID
 }
 
+// characterEchoOrCtx 优先使用请求体中的 echo，缺失时回退到外层信封 echo。
+func characterEchoOrCtx(echo string, ctx *ChatContext) string {
+	if trimmed := strings.TrimSpace(echo); trimmed != "" {
+		return trimmed
+	}
+	if ctx != nil {
+		return strings.TrimSpace(ctx.Echo)
+	}
+	return ""
+}
+
 func apiCharacterSet(ctx *ChatContext, msg []byte) {
 	if ctx == nil || ctx.Conn == nil {
 		return
@@ -99,7 +110,8 @@ func apiCharacterSet(ctx *ChatContext, msg []byte) {
 		} `json:"data"`
 	}{}
 	if err := json.Unmarshal(msg, &data); err != nil {
-		sendCharacterError(ctx, data.Echo, "请求解析失败")
+		// 解析失败时 data.Echo 可能为空，回退到外层信封的 echo，避免前端请求悬挂到超时
+		sendCharacterError(ctx, characterEchoOrCtx(data.Echo, ctx), "请求解析失败")
 		return
 	}
 	if !canSetOwnCharacterCard(ctx, data.Data.UserID) {

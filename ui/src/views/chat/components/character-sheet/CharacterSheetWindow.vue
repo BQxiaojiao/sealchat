@@ -568,15 +568,31 @@ const handleJsonEditStart = () => {
   sheetStore.beginEditLock(props.windowId, 'json');
 };
 
-const handleJsonSave = () => {
+const handleJsonSave = async () => {
   const win = windowData.value;
   if (!win || win.readOnly) return;
+  let parsed: Record<string, any>;
   try {
-    const parsed = JSON.parse(jsonText.value);
-    jsonError.value = '';
-    sheetStore.updateAttrs(props.windowId, parsed);
+    parsed = JSON.parse(jsonText.value);
   } catch (e: any) {
     jsonError.value = 'JSON 格式错误: ' + (e.message || '');
+    sheetStore.endEditLock(props.windowId, 'json');
+    return;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    jsonError.value = 'JSON 数据必须是一个对象（{ ... }）';
+    sheetStore.endEditLock(props.windowId, 'json');
+    return;
+  }
+  jsonError.value = '';
+  sheetStore.updateAttrs(props.windowId, parsed);
+  try {
+    const result = await sheetStore.flushAttrsSync(props.windowId);
+    if (!result.ok) {
+      const detail = result.error || '保存失败';
+      jsonError.value = `保存失败：${detail}`;
+      message.error(`人物卡数据保存失败：${detail}`);
+    }
   } finally {
     sheetStore.endEditLock(props.windowId, 'json');
   }

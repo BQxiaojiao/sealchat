@@ -1155,9 +1155,19 @@ export const useCharacterCardStore = defineStore('characterCard', () => {
   // Update card attributes - backwards compatible signature
   // Old: updateCard(cardId, name, sheetType, attrs)
   // New: Uses character.set with channelId
-  const updateCard = async (cardIdOrChannelId: string, name: string, sheetTypeOrAttrs: string | Record<string, any>, attrsOrUndefined?: Record<string, any>) => {
+  const updateCard = async (
+    cardIdOrChannelId: string,
+    name: string,
+    sheetTypeOrAttrs: string | Record<string, any>,
+    attrsOrUndefined?: Record<string, any>,
+    options?: { throwOnError?: boolean },
+  ) => {
+    const throwOnError = options?.throwOnError === true;
     const userId = getUserId();
-    if (!userId) return null;
+    if (!userId) {
+      if (throwOnError) throw new Error('未登录，无法保存人物卡');
+      return null;
+    }
 
     // Determine if this is old style (cardId, name, sheetType, attrs) or new style (channelId, name, attrs)
     let channelId: string;
@@ -1174,7 +1184,10 @@ export const useCharacterCardStore = defineStore('characterCard', () => {
       attrs = attrsOrUndefined || {};
     }
 
-    if (!channelId) return null;
+    if (!channelId) {
+      if (throwOnError) throw new Error('缺少频道，无法保存人物卡');
+      return null;
+    }
     assertCharacterApiEnabled(channelId, 'updateCard');
 
     await chatStore.ensureConnectionReady();
@@ -1188,11 +1201,20 @@ export const useCharacterCardStore = defineStore('characterCard', () => {
       });
       maybeDisableFromResponse(channelId, resp);
       if (resp?.data?.ok) {
-        await getActiveCard(channelId);
-        await loadCardList(channelId);
+        try {
+          await getActiveCard(channelId);
+          await loadCardList(channelId);
+        } catch (refreshError) {
+          // 写入已成功，读取刷新失败不应让调用方误判保存失败
+          console.warn('Failed to refresh character card after save', refreshError);
+        }
         return true;
       }
+      const errorMessage = resp?.data?.error || 'INTERNAL_ERROR';
+      if (throwOnError) throw new Error(errorMessage);
+      console.warn('Failed to update character card', { channelId, name, error: errorMessage });
     } catch (e) {
+      if (throwOnError) throw e;
       console.warn('Failed to update character card', e);
     }
     return false;

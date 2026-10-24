@@ -862,6 +862,8 @@ export const useCharacterSheetStore = defineStore('characterSheet', () => {
 
   let attrsSyncTimer: Record<string, ReturnType<typeof setTimeout> | null> = {};
   const editLockHoldersByWindow = new Map<string, Set<CharacterSheetEditLockHolder>>();
+  const attrsSyncChain = new Map<string, Promise<{ ok: boolean; error?: string }>>();
+  const attrsSyncDirty = new Set<string>();
 
   const beginEditLock = (windowId: string, holder: CharacterSheetEditLockHolder = 'iframe') => {
     const win = windows.value[windowId];
@@ -915,42 +917,96 @@ export const useCharacterSheetStore = defineStore('characterSheet', () => {
     schedulePersistWindows();
   };
 
+  const applyAttrsSyncResult = (win: CharacterSheetWindow, ok: boolean) => {
+    if (!ok) return;
+    win.hasSavedAfterEditEnd = true;
+    if (win.syncState === 'resume_pending') {
+      win.hasLocalEditsInLock = false;
+      win.pendingRemoteAttrs = undefined;
+      win.syncState = 'normal';
+    }
+    schedulePersistWindows();
+  };
+
+  const clearAttrsSyncTimer = (windowId: string) => {
+    if (!attrsSyncTimer[windowId]) return;
+    clearTimeout(attrsSyncTimer[windowId] as ReturnType<typeof setTimeout>);
+    attrsSyncTimer[windowId] = null;
+  };
+
+  const writeAttrsSnapshot = async (
+    windowId: string,
+    snapshot: { win: CharacterSheetWindow; channelId: string; cardName: string; attrs: Record<string, any> },
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const { win, channelId, cardName, attrs } = snapshot;
+    normalizeSyncState(win);
+    try {
+      const ok = await cardStore.updateCard(channelId, cardName, attrs, undefined, { throwOnError: true });
+      if (ok) attrsSyncDirty.delete(windowId);
+      applyAttrsSyncResult(win, ok);
+      return ok ? { ok: true } : { ok: false, error: '人物卡数据保存失败' };
+    } catch (e: any) {
+      const error = String(e?.response?.data?.error || e?.message || '人物卡数据保存失败');
+      console.warn('Failed to sync character sheet attrs', { windowId, channelId, cardName, error });
+      return { ok: false, error };
+    }
+  };
+
+  // 立即写入人物卡属性并返回真实结果，供调用方提示失败原因，避免静默丢失。
+  // 同一窗口的写入串行执行，且快照在调用时采集，避免关闭窗口后读到已删除的数据。
+  const flushAttrsSync = (windowId: string): Promise<{ ok: boolean; error?: string }> => {
+    clearAttrsSyncTimer(windowId);
+    const win = windows.value[windowId];
+    if (!win) return Promise.resolve({ ok: false, error: '人物卡窗口已关闭' });
+    if (win.readOnly) return Promise.resolve({ ok: false, error: '该人物卡为只读' });
+    if (!win.channelId || !win.cardName) {
+      return Promise.resolve({ ok: false, error: '缺少频道或人物卡名称，无法保存' });
+    }
+    const snapshot = { win, channelId: win.channelId, cardName: win.cardName, attrs: win.attrs };
+    const previous = attrsSyncChain.get(windowId);
+    const run = (previous ? previous.catch(() => ({ ok: false })) : Promise.resolve({ ok: true }))
+      .then(() => writeAttrsSnapshot(windowId, snapshot));
+    attrsSyncChain.set(windowId, run);
+    const release = () => {
+      if (attrsSyncChain.get(windowId) === run) attrsSyncChain.delete(windowId);
+    };
+    void run.then(release, release);
+    return run;
+  };
+
   const scheduleAttrsSync = (windowId: string) => {
     const win = windows.value[windowId];
-    if (!win || !win.channelId || !win.cardName) return;
-    normalizeSyncState(win);
-    if (attrsSyncTimer[windowId]) {
-      clearTimeout(attrsSyncTimer[windowId] as ReturnType<typeof setTimeout>);
+    if (!win || win.readOnly) return;
+    if (!win.channelId || !win.cardName) {
+      console.warn('Character sheet attrs sync skipped: missing channel or card name', {
+        windowId,
+        channelId: win.channelId,
+        cardName: win.cardName,
+      });
+      return;
     }
-    attrsSyncTimer[windowId] = setTimeout(async () => {
-      try {
-        const latest = windows.value[windowId];
-        if (!latest) return;
-        const ok = await cardStore.updateCard(latest.channelId, latest.cardName, latest.attrs);
-        if (ok) {
-          latest.hasSavedAfterEditEnd = true;
-          if (latest.syncState === 'resume_pending') {
-            latest.hasLocalEditsInLock = false;
-            latest.pendingRemoteAttrs = undefined;
-            latest.syncState = 'normal';
-          }
-          schedulePersistWindows();
-        }
-      } catch (e) {
-        console.warn('Failed to sync character sheet attrs', e);
-      }
+    normalizeSyncState(win);
+    clearAttrsSyncTimer(windowId);
+    attrsSyncTimer[windowId] = setTimeout(() => {
+      attrsSyncTimer[windowId] = null;
+      void flushAttrsSync(windowId);
     }, ATTRS_SYNC_THROTTLE);
   };
+
+  const hasPendingAttrsSync = (windowId: string) => !!attrsSyncTimer[windowId] || attrsSyncChain.has(windowId);
 
   const refreshWindowAttrs = async (windowId: string) => {
     const win = windows.value[windowId];
     if (!win || !win.channelId) return;
     if (win.readOnly) return;
     normalizeSyncState(win);
+    // 本地仍有待写入的改动或正在写入时，不用远端数据覆盖，避免未保存内容被回滚
+    if (hasPendingAttrsSync(windowId)) return;
     try {
       const active = await cardStore.getActiveCard(win.channelId);
       if (!active || !active.attrs) return;
       if (active.name && active.name !== win.cardName) return;
+      if (hasPendingAttrsSync(windowId)) return;
       if (win.syncState !== 'normal') {
         win.pendingRemoteAttrs = active.attrs;
         return;
@@ -1134,15 +1190,19 @@ export const useCharacterSheetStore = defineStore('characterSheet', () => {
   };
 
   const closeSheet = (windowId: string) => {
+    const win = windows.value[windowId];
+    if (win && !win.readOnly && attrsSyncDirty.has(windowId)) {
+      attrsSyncDirty.delete(windowId);
+      // 关闭前立即落盘，避免防抖中的改动随窗口一起丢失
+      void flushAttrsSync(windowId);
+    }
     const idx = activeWindowIds.value.indexOf(windowId);
     if (idx !== -1) {
       activeWindowIds.value.splice(idx, 1);
     }
     editLockHoldersByWindow.delete(windowId);
-    if (attrsSyncTimer[windowId]) {
-      clearTimeout(attrsSyncTimer[windowId] as ReturnType<typeof setTimeout>);
-      delete attrsSyncTimer[windowId];
-    }
+    clearAttrsSyncTimer(windowId);
+    delete attrsSyncTimer[windowId];
     delete windows.value[windowId];
     schedulePersistWindows();
   };
@@ -1201,6 +1261,7 @@ export const useCharacterSheetStore = defineStore('characterSheet', () => {
         win.hasSavedAfterEditEnd = false;
       }
       schedulePersistWindows();
+      attrsSyncDirty.add(windowId);
       scheduleAttrsSync(windowId);
     }
   };
@@ -1290,6 +1351,8 @@ export const useCharacterSheetStore = defineStore('characterSheet', () => {
     }
     attrsSyncTimer = {};
     editLockHoldersByWindow.clear();
+    attrsSyncChain.clear();
+    attrsSyncDirty.clear();
     clearWindowStates();
   };
 
@@ -1346,6 +1409,7 @@ export const useCharacterSheetStore = defineStore('characterSheet', () => {
     updatePosition,
     updateSize,
     updateAttrs,
+    flushAttrsSync,
     beginEditLock,
     endEditLock,
     updateTemplate,
